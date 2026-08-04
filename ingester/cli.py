@@ -60,6 +60,12 @@ def _build_parser() -> argparse.ArgumentParser:
     hf.add_argument("--license", default=None, help="license name to record")
     hf.add_argument("--endpoint", default=os.environ.get("HF_ENDPOINT", ""),
                     help="HF endpoint (default: $HF_ENDPOINT or huggingface.co)")
+    hf.add_argument("--retries", type=int, default=6,
+                    help="max retries on transient/network errors (default 6). "
+                         "Each retry resumes per-file from where it left off.")
+    hf.add_argument("--progress-log", default=None,
+                    help="path to append structured progress lines to (tail-able). "
+                         "Default: <store>/log/ingest-<repo>.log")
     hf.set_defaults(func=_cmd_ingest_hf)
 
     # ---- ingest civitai ----
@@ -121,19 +127,27 @@ def _cmd_ingest_hf(args) -> int:
     event_log = events.EventLog(storage.events_path)
     repo = RepositoryCore(storage, event_log)
 
-    # Each ingest gets its own staging txid so concurrent ingests don't collide.
-    txid = uuid.uuid4().hex[:12]
-    staging = storage.staging_dir / f"hf-{txid}"
+    # Deterministic staging dir per repo_id, so an interrupted ingest RESUMES
+    # on re-run (HF's resume cache lives under staging/.cache/huggingface/ and
+    # must be at the same path to be reused). A lockfile prevents two concurrent
+    # ingests of the same repo from corrupting each other.
+    staging = storage.staging_dir / f"hf-{_slug(args.repo_id)}"
     staging.mkdir(parents=True, exist_ok=True)
 
     token = args.token or None
     endpoint = args.endpoint or None
+    # Default progress log: <store>/log/ingest-<repo>.log (tail-able).
+    progress_log = Path(args.progress_log) if args.progress_log else (
+        settings.log_dir / f"ingest-{_slug(args.repo_id)}.log")
     try:
         print(f"resolving and downloading {args.repo_id} @ {args.rev} ...")
+        print(f"  (retries={args.retries}; resume-on-interrupt enabled; "
+              f"log: {progress_log})")
         snapshot = hf_source.fetch(
             args.repo_id, staging, revision=args.rev, token=token,
             allow_patterns=args.allow, ignore_patterns=args.ignore,
-            endpoint=endpoint,
+            endpoint=endpoint, max_retries=args.retries,
+            progress_log=progress_log,
         )
         print(f"  commit {snapshot.commit}, {len(snapshot.files)} file(s)")
 
@@ -147,9 +161,22 @@ def _cmd_ingest_hf(args) -> int:
             print(f"  {args.ref} -> {result.commit}")
         print("done.")
     finally:
-        # Clean up staging regardless of success/failure.
-        _rm_tree(staging)
+        # Clean up staging regardless of success/failure. The HF cache under
+        # staging/.cache/huggingface/ is what powers resume; removing staging
+        # between runs would lose it. So: on a FAILED ingest we deliberately
+        # keep staging so the next attempt resumes. On success we remove it.
+        import sys as _sys
+        if _sys.exc_info()[0] is None:
+            _rm_tree(staging)
+        else:
+            print(f"  (staging kept at {staging} — re-run to resume)",
+                  file=_sys.stderr)
     return 0
+
+
+def _slug(s: str) -> str:
+    import re
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", s).strip("-")[:60] or "repo"
 
 
 def _cmd_ingest_civitai(args) -> int:
@@ -161,8 +188,8 @@ def _cmd_ingest_civitai(args) -> int:
     event_log = events.EventLog(storage.events_path)
     repo = RepositoryCore(storage, event_log)
 
-    txid = uuid.uuid4().hex[:12]
-    staging = storage.staging_dir / f"civitai-{txid}"
+    # Deterministic per version_id, so an interrupted Civitai ingest resumes.
+    staging = storage.staging_dir / f"civitai-{args.version_id}"
     staging.mkdir(parents=True, exist_ok=True)
 
     try:

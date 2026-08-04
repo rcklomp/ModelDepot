@@ -92,7 +92,7 @@ def test_ingest_hf_with_stubbed_fetch(mirror_root: Path, capsys, monkeypatch):
     os.environ["MIRROR_ROOT"] = str(mirror_root)
 
     def fake_fetch(repo_id, staging_dir, *, revision="main", token=None,
-                   allow_patterns=None, ignore_patterns=None, endpoint=None):
+                   allow_patterns=None, ignore_patterns=None, endpoint=None, **_):
         # Write a fake file into staging and return a snapshot.
         content = b"fake model bytes"
         path = staging_dir / "config.json"

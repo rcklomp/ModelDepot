@@ -164,6 +164,94 @@ bandwidth-efficient (only new blobs transfer) and safely resumable.
 
 ---
 
+## Ingesting large models (resume on interrupt)
+
+Big models — a 100+ GiB GGUF in 4 shards, or a multi-GB safetensors repo — take
+hours to download and will inevitably hit a network drop or two. The ingester is
+built for this; nothing about an interrupted ingest is lost.
+
+### How resume works
+
+- **Per-file resume.** `huggingface_hub` downloads each file via HTTP Range into
+  an internal cache under `staging/.cache/huggingface/`, leaving a `.incomplete`
+  file if interrupted. Re-running the same command continues from exactly where
+  it left off — completed shards are never re-downloaded.
+- **Deterministic staging.** Staging lives at `staging/hf-<repo-slug>` (a fixed
+  path per repo), so the resume cache is found on re-run. (Same for Civitai:
+  `staging/civitai-<version_id>`.)
+- **Staging is kept on failure.** If an ingest dies — network drop, Ctrl-C,
+  process killed — the staging dir is *not* cleaned up, so the next run resumes.
+  It is only removed after a successful publish.
+- **Automatic retry.** The download is wrapped in a retry loop: on a transient
+  failure (network drop, timeout, HTTP 429/5xx) it backs off (exponential, capped
+  at 60s) and retries up to `--retries` times (default 6), resuming each time.
+  Fatal errors (404, gated, bad revision) fail immediately without wasting
+  retries.
+
+Note: the old `hf_transfer` accelerator is deprecated in `huggingface_hub` 1.x
+(its replacement, the Xet backend, is disabled here), so resume-around-retries
+is the supported path for large files.
+
+### Babysitting a long download
+
+Every ingest writes structured progress lines to a log file you can tail:
+
+```bash
+# In one terminal, kick off the big download:
+export MIRROR_ROOT=/Volumes/2TB/llm-mirror
+export HF_HUB_DISABLE_XET=1
+repo ingest-hf unsloth/DeepSeek-V4-Flash-0731-GGUF --rev main --allow "UD-IQ3_XXS/*"
+
+# In another, watch what's happening:
+tail -f /Volumes/2TB/llm-mirror/log/ingest-unsloth-DeepSeek-V4-Flash-0731-GGUF.log
+```
+
+Log lines look like:
+```
+2026-08-04T16:47:37+00:00 attempt=1 repo=... status=downloading
+2026-08-04T16:48:10+00:00 attempt=1 repo=... status=retry reason=HfHubHTTPError(503) wait=2s (will resume from HF cache)
+2026-08-04T16:50:02+00:00 attempt=2 repo=... status=complete
+```
+
+### If it's interrupted (connection drop, you closed the laptop, etc.)
+
+Just run the exact same command again. It resumes:
+
+```bash
+repo ingest-hf unsloth/DeepSeek-V4-Flash-0731-GGUF --rev main --allow "UD-IQ3_XXS/*"
+```
+
+There's no special "resume" flag — re-running IS resume. You'll see it pick up
+from the partial download rather than restart.
+
+### Pulling one quant of a multi-quant repo
+
+Large GGUF repos ship many quants (often 1+ TiB total). Use `--allow` to grab
+just the quant directory you want, so you don't accidentally pull everything:
+
+```bash
+# Just the UD-IQ3_XXS quant (~97 GiB, 4 shards), not the whole ~1.4 TiB repo:
+repo ingest-hf unsloth/DeepSeek-V4-Flash-0731-GGUF --rev main --allow "UD-IQ3_XXS/*"
+```
+
+### Tuning for a flaky link
+
+```bash
+# More retries (default 6) and a custom progress log:
+repo ingest-hf <repo> --retries 12 --progress-log /tmp/deepseek-ingest.log
+```
+
+### Cleaning up a failed ingest's staging
+
+If you genuinely want to discard a partial download and start fresh (e.g. you
+changed the `--allow` pattern and the cache is stale), remove the staging dir:
+
+```bash
+rm -rf $MIRROR_ROOT/staging/hf-<repo-slug>
+```
+
+---
+
 ## Replication / backup
 
 The store is plain files — replicate it anywhere with rsync:
