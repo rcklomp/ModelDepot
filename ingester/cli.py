@@ -62,6 +62,23 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="HF endpoint (default: $HF_ENDPOINT or huggingface.co)")
     hf.set_defaults(func=_cmd_ingest_hf)
 
+    # ---- ingest civitai ----
+    cv = sub.add_parser("ingest-civitai",
+                        help="ingest a Civitai model version")
+    cv.add_argument("version_id", type=int,
+                    help="Civitai model version id (the numeric version, not model id)")
+    cv.add_argument("--token", default=os.environ.get("CIVITAI_API_KEY", ""),
+                    help="Civitai API token (default: $CIVITAI_API_KEY)")
+    cv.add_argument("--type", default=None,
+                    help="only download files of this type (e.g. 'Model', 'VAE')")
+    cv.add_argument("--format", default=None,
+                    help="only download files of this format (e.g. 'SafeTensor')")
+    cv.add_argument("--ref", default="main",
+                    help="local reference name to point at the new commit")
+    cv.add_argument("--no-update-ref", action="store_true",
+                    help="publish without moving the ref")
+    cv.set_defaults(func=_cmd_ingest_civitai)
+
     # ---- list ----
     ls = sub.add_parser("list", help="list repositories")
     ls.set_defaults(func=_cmd_list)
@@ -81,6 +98,14 @@ def _build_parser() -> argparse.ArgumentParser:
     gc = sub.add_parser("gc", help="delete unreferenced blobs")
     gc.add_argument("--dry-run", action="store_true", help="report only, don't delete")
     gc.set_defaults(func=_cmd_gc)
+
+    # ---- jobs ----
+    jb = sub.add_parser("jobs", help="run background maintenance jobs")
+    jb.add_argument("which", choices=["all", "integrity", "gc", "index"],
+                    help="which job to run")
+    jb.add_argument("--dry-run", action="store_true",
+                    help="for gc: report only, don't delete")
+    jb.set_defaults(func=_cmd_jobs)
 
     return p
 
@@ -123,6 +148,47 @@ def _cmd_ingest_hf(args) -> int:
         print("done.")
     finally:
         # Clean up staging regardless of success/failure.
+        _rm_tree(staging)
+    return 0
+
+
+def _cmd_ingest_civitai(args) -> int:
+    from . import civitai_source, transaction
+
+    settings = load_settings()
+    storage = FilesystemStorage(settings)
+    storage.ensure_layout()
+    event_log = events.EventLog(storage.events_path)
+    repo = RepositoryCore(storage, event_log)
+
+    txid = uuid.uuid4().hex[:12]
+    staging = storage.staging_dir / f"civitai-{txid}"
+    staging.mkdir(parents=True, exist_ok=True)
+
+    try:
+        print(f"fetching Civitai version {args.version_id} ...")
+        snap = civitai_source.fetch(
+            args.version_id, staging, token=args.token,
+            file_type=args.type, file_format=args.format,
+        )
+        print(f"  model: {snap.model_name} (id {snap.model_id})")
+        print(f"  version: {snap.version_name} (id {snap.version_id}), "
+              f"{len(snap.files)} file(s)")
+
+        staged = civitai_source.to_staged_snapshot(snap)
+        result = transaction.ingest(
+            repo, staged, source_kind="civitai",
+            source_ref=civitai_source.civitai_source_url(snap.model_id, snap.version_id),
+            ref_name=args.ref, license_name=snap.license_name,
+            update_ref=not args.no_update_ref,
+        )
+        print(f"  {'published' if result.published else 'already present'} "
+              f"revision {result.commit} ({result.file_count} files)")
+        if result.ref_updated:
+            print(f"  {args.ref} -> {result.commit}")
+        print(f"  serve at: /{staged.repo_id}/resolve/{args.ref}/<file>")
+        print("done.")
+    finally:
         _rm_tree(staging)
     return 0
 
@@ -192,6 +258,35 @@ def _cmd_gc(args) -> int:
     print(f"{len(orphans)} unreferenced blob(s) "
           f"{'reported' if args.dry_run else 'deleted'}")
     return 0
+
+
+def _cmd_jobs(args) -> int:
+    from . import jobs
+    from server.index import open_index
+
+    settings = load_settings()
+    storage = FilesystemStorage(settings)
+    repo = RepositoryCore(storage, events.EventLog(storage.events_path))
+    index = open_index(settings.index_backend, storage.index_dir)
+
+    which = args.which
+    if which == "all":
+        reports = jobs.run_all(repo, index=index)
+    elif which == "integrity":
+        reports = [jobs.integrity(repo)]
+    elif which == "gc":
+        reports = [jobs.gc(repo, dry_run=args.dry_run)]
+    elif which == "index":
+        reports = [jobs.index_rebuild(repo, index)]
+    else:
+        print(f"unknown job: {which}", file=sys.stderr)
+        return 2
+
+    for r in reports:
+        print(r)
+        for p in r.problems:
+            print(f"  {p}")
+    return 0 if all(r.ok for r in reports) else 1
 
 
 def _rm_tree(path: Path) -> None:

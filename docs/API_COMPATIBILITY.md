@@ -1,10 +1,84 @@
 # API Compatibility
 
-This document specifies exactly which Hugging Face endpoints and headers the HF
-adapter implements, which are tested, and which are intentionally omitted.
+Exactly which Hugging Face endpoints and headers the HF adapter implements, which
+are tested, and which are intentionally omitted. This is the **verified minimum
+compatibility surface for current HF clients** — not a permanent contract. If HF
+changes its API, only `server/adapters/hf_adapter.py` changes.
 
-See `docs/DESIGN.md` for the architectural rationale.
+## How clients reach the mirror
 
-## Status: stub
+```bash
+export HF_ENDPOINT=http://<mirror>:<port>
+export HF_HUB_DISABLE_XET=1
+```
 
-(Filled in during Milestone 2 — HF Compatibility.)
+`huggingface_hub` (and every engine built on it) reads `HF_ENDPOINT` at import
+time and routes all resolution and downloads there.
+
+## Implemented endpoints
+
+All GET (the mirror is read-only; ingest happens via the CLI).
+
+| Endpoint | Status | Purpose |
+|---|---|---|
+| `GET /api/models/{repo_id}` | ✅ implemented + tested | Model metadata (`sha`, `siblings`, `private`, `gated`) |
+| `GET /api/models/{org}/{repo}/tree/{rev}/{path?}` | ✅ implemented + tested | File listing |
+| `GET /{repo_id}/resolve/{rev}/{filename}` | ✅ implemented + tested (GET + HEAD) | Blob download — the load-bearing route |
+| `GET /api/models/{org}/{repo}/refs` | ✅ implemented + tested | Branch/tag references |
+| `GET /api/models/{org}/{repo}/commits/{rev}` | ✅ implemented + tested | Commit history (single entry per revision) |
+| `POST /api/models/{org}/{repo}/paths-info/{rev}` | ✅ implemented | Batch file metadata |
+
+## The resolve route contract (the critical one)
+
+`GET /{repo_id}/resolve/{rev}/{filename}` must return these for `huggingface_hub`
+to accept the file (verified against `huggingface_hub` source —
+`file_download.py`, `_get_metadata_or_catch_error`):
+
+| Header | Required | Source |
+|---|---|---|
+| `X-Repo-Commit` | **yes** — HF raises `FileMetadataError` without it | manifest commit |
+| `ETag` (or `X-Linked-Etag`) | **yes** — used as the cache key | upstream HF etag (lfs.sha256 / git blob_id) |
+| `Content-Length` (or `X-Linked-Size`) | **yes** | file size |
+| `Accept-Ranges: bytes` | for resumability | set |
+| `Content-Range` | on `206` Range responses | computed |
+
+Behavior:
+- `GET` → `200` + streamed bytes (full file) or `206` + ranged bytes (with `Range`).
+- `HEAD` → same headers, no body (this is what `get_hf_file_metadata` issues first).
+- `Range` requests honored with `206` + `Content-Range` for resumable downloads.
+- No redirect is required — `huggingface_hub` accepts a direct `200` body. The
+  `Location` header is optional; if absent, the request URL is used as the
+  download location.
+
+## Adapter capability matrix
+
+```
+HF:         resolve ✓  tree ✓  refs ✓  commits ✓  upload ✗  search ✗
+Civitai:    (planned)  resolve ✓  tree ✓  refs ✗  commits ✗  upload ✗  search ✗
+Filesystem: (planned)  resolve ✓  tree ✓  refs ✗  commits ✗  upload ✗  search ✗
+OCI:        (future)   resolve ✓  tree ✓  refs ✓  commits ✓  upload ✓  search ✗
+```
+
+## Intentionally omitted
+
+- **Xet chunk protocol.** Avoided via `HF_HUB_DISABLE_XET=1`. If Xet ever
+  becomes mandatory for public downloads, the adapter will need to grow.
+- **`/api/datasets/...`, `/api/spaces/...`.** Out of scope (models only).
+- **Write/upload endpoints** (`POST /api/models/...`, LFS upload). The mirror is
+  read-only; ingest happens through the CLI on a trusted box.
+- **Search** (`/api/models?search=...`). Out of scope; use `repo list` locally.
+- **LM Studio's internal catalog.** Not an HF API; LM Studio consumes the mirror
+  via local-file import (see CLIENT_SETUP.md).
+
+## Engine coverage (validated in `tests/engines/test_matrix.py`)
+
+| Engine | Consumption | Status |
+|---|---|---|
+| transformers / diffusers | `HF_ENDPOINT` via huggingface_hub | ✅ tested (real hf client) |
+| vLLM | `HF_ENDPOINT` + `--model` | ✅ covered by hf_hub test |
+| TGI | `HF_ENDPOINT` | ✅ covered by hf_hub test |
+| MLX (`mlx_lm`) | `HF_ENDPOINT` | ✅ covered by hf_hub test |
+| `huggingface_hub` CLI | `HF_ENDPOINT` | ✅ tested (real hf client) |
+| Ollama | `hf.co/<repo>:<file>` + `HF_ENDPOINT` | ✅ tested (resolve flow) |
+| llama.cpp | `--model-url <resolve URL>` | ✅ tested (direct stream + Range) |
+| LM Studio | local-file import | ✅ documented exception |
