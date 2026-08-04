@@ -1,0 +1,247 @@
+"""Repository Core — pure domain logic.
+
+This module knows nothing about HTTP or Hugging Face. Adapters translate
+requests into calls here. The core composes four collaborators:
+
+  - storage.StorageBackend : where blobs/manifests/refs live on disk
+  - blobstore.BlobStore    : content-addressed blob I/O
+  - refs                   : mutable reference (branch/tag) state
+  - events.EventLog        : append-only audit log
+
+The core is the only thing that mutates live pointers (refs). Publishing a
+revision is the single atomic step that makes new content visible to serving.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterator
+
+from . import events, manifests, refs
+from .blobstore import HEX, IntegrityError, StoredBlob
+from .storage import FilesystemStorage
+
+
+@dataclass(frozen=True)
+class ResolvedFile:
+    """A file within a resolved revision, with a handle to its blob."""
+
+    path: str
+    size: int
+    blob_ref: str            # 'sha256:<digest>'
+    digest: HEX              # raw hex digest
+    metadata: dict
+
+
+class RepositoryNotFound(Exception):
+    pass
+
+
+class RevisionNotFound(Exception):
+    pass
+
+
+class FileNotFound(Exception):
+    pass
+
+
+class RevisionExists(Exception):
+    """Raised when trying to publish a revision that already exists."""
+
+
+class RepositoryCore:
+    """Domain operations over the store. Stateless beyond its collaborators."""
+
+    def __init__(self, storage: FilesystemStorage, event_log: events.EventLog):
+        self._storage = storage
+        self._events = event_log
+
+    # ---- reads ---------------------------------------------------------
+
+    def list_repos(self) -> list[str]:
+        return list(self._storage.iter_repos())
+
+    def list_references(self, repo_id: str) -> dict[str, str]:
+        return refs.load(self._storage.refs_path(repo_id))
+
+    def list_revisions(self, repo_id: str) -> list[str]:
+        rev_dir = self._storage.revisions_dir(repo_id)
+        if not rev_dir.is_dir():
+            return []
+        return sorted(
+            d.name for d in rev_dir.iterdir() if d.is_dir() and (d / "manifest.json").is_file()
+        )
+
+    def resolve_ref(self, repo_id: str, ref_or_commit: str) -> str:
+        """Resolve a ref name or raw commit to a concrete commit hash.
+
+        Tries, in order: (1) a known ref name, (2) the hex-commit heuristic,
+        (3) an actual published revision with that name. Raises
+        RepositoryNotFound / RevisionNotFound.
+        """
+        refs_map = self.list_references(repo_id)
+        if ref_or_commit in refs_map:
+            return refs_map[ref_or_commit]
+        # Hex-commit heuristic: a value that looks like a SHA is treated as one.
+        commit = refs.resolve(refs_map, ref_or_commit)
+        if commit is not None:
+            return commit
+        # Fallback: a published revision directory literally named ref_or_commit.
+        if self._storage.manifest_path(repo_id, ref_or_commit).is_file():
+            return ref_or_commit
+        # Distinguish "no such repo" from "no such revision" for clear errors.
+        if not refs_map and not self._storage.revisions_dir(repo_id).is_dir():
+            if not self._storage.refs_path(repo_id).is_file():
+                raise RepositoryNotFound(repo_id)
+        raise RevisionNotFound(f"{repo_id}: unknown ref {ref_or_commit!r}")
+
+    def get_manifest(self, repo_id: str, ref_or_commit: str) -> manifests.Manifest:
+        commit = self.resolve_ref(repo_id, ref_or_commit)
+        path = self._storage.manifest_path(repo_id, commit)
+        if not path.is_file():
+            raise RevisionNotFound(f"{repo_id}@{commit}: manifest missing")
+        return manifests.read(path)
+
+    def list_files(self, repo_id: str, ref_or_commit: str) -> list[manifests.FileEntry]:
+        return self.get_manifest(repo_id, ref_or_commit).files
+
+    def get_file(self, repo_id: str, ref_or_commit: str, file_path: str) -> ResolvedFile:
+        """Look up a single file in a revision. Raises FileNotFound."""
+        m = self.get_manifest(repo_id, ref_or_commit)
+        for entry in m.files:
+            if entry.path == file_path:
+                digest = entry.blob.split(":", 1)[1]
+                return ResolvedFile(
+                    path=entry.path,
+                    size=entry.size,
+                    blob_ref=entry.blob,
+                    digest=digest,
+                    metadata=entry.metadata,
+                )
+        raise FileNotFound(f"{repo_id}: {file_path}")
+
+    def open_blob(self, digest: HEX):
+        """Open a blob for binary streaming. Caller closes the file."""
+        if not self._storage.blobs.exists(digest):
+            raise FileNotFound(f"blob sha256:{digest}")
+        return self._storage.blobs.open(digest)
+
+    def blob_path(self, digest: HEX) -> Path:
+        """Filesystem path for a blob (for X-Sendfile / range serving)."""
+        return self._storage.blobs.path_for(digest)
+
+    # ---- writes --------------------------------------------------------
+
+    def put_blob(self, src: Path, expected_digest: HEX | None = None) -> StoredBlob:
+        """Content-address a staged file into the blob store. Emits BlobStored."""
+        blob = self._storage.blobs.put_file(src, expected_digest=expected_digest)
+        self._events.emit(
+            events.BLOB_STORED, digest=blob.digest, size=blob.size, repo=None
+        )
+        return blob
+
+    def put_blob_bytes(self, data: bytes) -> StoredBlob:
+        blob = self._storage.blobs.put_bytes(data)
+        self._events.emit(events.BLOB_STORED, digest=blob.digest, size=blob.size)
+        return blob
+
+    def publish_revision(self, manifest: manifests.Manifest) -> Path:
+        """Atomically publish a revision's manifest. Emits RevisionPublished.
+
+        The manifest is written to its final path in one step. If it already
+        exists, RevisionExists is raised (revisions are immutable — never
+        overwritten). This is the only call that makes new content visible to
+        serving.
+        """
+        repo_id = manifest.repo_id
+        commit = manifest.revision.commit
+        dest = self._storage.manifest_path(repo_id, commit)
+        if dest.is_file():
+            raise RevisionExists(f"{repo_id}@{commit} already published")
+        manifests.write_atomic(manifest, dest)
+        self._events.emit(
+            events.REVISION_PUBLISHED,
+            repo_id=repo_id,
+            commit=commit,
+            file_count=len(manifest.files),
+        )
+        return dest
+
+    def update_reference(self, repo_id: str, name: str, commit: str) -> dict[str, str]:
+        """Point `name` at `commit` and persist. Emits ReferenceUpdated.
+
+        This is the only mutation of live pointer state. It is safe to call
+        before or after publish_revision; the convention is publish-then-ref.
+        """
+        updated = refs.set_ref(self._storage.refs_path(repo_id), name, commit)
+        self._events.emit(
+            events.REFERENCE_UPDATED, repo_id=repo_id, name=name, commit=commit
+        )
+        return updated
+
+    def repository_created(self, repo_id: str) -> None:
+        """Emit RepositoryCreated. Idempotent marker that a repo now exists."""
+        self._events.emit(events.REPOSITORY_CREATED, repo_id=repo_id)
+
+    # ---- maintenance ---------------------------------------------------
+
+    def verify_blob(self, digest: HEX) -> bool:
+        ok = self._storage.blobs.verify(digest)
+        self._events.emit(
+            events.BLOB_VERIFIED, digest=digest, ok=ok
+        )
+        if not ok:
+            self._events.emit(events.INTEGRITY_FAILED, digest=digest)
+        return ok
+
+    def iter_blobs(self) -> Iterator[HEX]:
+        """Yield every blob digest present in the store."""
+        root = self._storage.blobs.root
+        if not root.is_dir():
+            return
+        for shard in sorted(root.iterdir()):
+            if not shard.is_dir():
+                continue
+            for blob in sorted(shard.iterdir()):
+                if blob.is_file() and not blob.name.startswith("."):
+                    yield blob.name
+
+    def collect_reachable_blobs(self) -> set[HEX]:
+        """Walk all manifests and collect the set of reachable blob digests.
+
+        Used by GC to derive reachability without any stored refcounts.
+        """
+        reachable: set[HEX] = set()
+        for repo_id in self.list_repos():
+            for commit in self.list_revisions(repo_id):
+                m = manifests.read(self._storage.manifest_path(repo_id, commit))
+                for f in m.files:
+                    try:
+                        reachable.add(f.blob.split(":", 1)[1])
+                    except (IndexError, ValueError):
+                        continue
+        return reachable
+
+    def collect_reachable_blobs_with_refs(self) -> dict[HEX, list[tuple[str, str, str]]]:
+        """Like collect_reachable_blobs but tracks which (repo, commit, path)
+        references each digest. Used for GC reporting / dry-run output."""
+        refs_map: dict[HEX, list[tuple[str, str, str]]] = {}
+        for repo_id in self.list_repos():
+            for commit in self.list_revisions(repo_id):
+                m = manifests.read(self._storage.manifest_path(repo_id, commit))
+                for f in m.files:
+                    try:
+                        digest = f.blob.split(":", 1)[1]
+                    except (IndexError, ValueError):
+                        continue
+                    refs_map.setdefault(digest, []).append((repo_id, commit, f.path))
+        return refs_map
+
+    def delete_blob(self, digest: HEX) -> bool:
+        """Remove an unreferenced blob. Emits GCDeletedBlob. Returns True if removed."""
+        path = self._storage.blobs.path_for(digest)
+        if not path.is_file():
+            return False
+        path.unlink()
+        self._events.emit(events.GC_DELETED_BLOB, digest=digest)
+        return True

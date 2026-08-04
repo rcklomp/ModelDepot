@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-repo"
+version = "0.1.0"
+description = "A general-purpose local AI artifact repository with a Hugging Face compatibility adapter."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Ronald" }]
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.6",
+    # huggingface_hub is an ingester dependency but listed here so the
+    # contract test (which loads transformers against the mirror) can run.
+    "huggingface_hub>=0.24",
+]
+
+[project.optional-dependencies]
+ingest = [
+    "huggingface_hub>=0.24",
+]
+test = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+    "transformers>=4.40",
+]
+
+[project.scripts]
+repo = "ingester.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["server*", "ingester*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,0 +1,39 @@
+# Caddy reverse proxy in front of the FastAPI shim.
+# Caddy handles: automatic HTTPS (Let's Encrypt / self-signed internal),
+# HTTP/2, gzip/zstd compression, Range request pass-through, and caching.
+#
+# {$MIRROR_HOST} is replaced from the container environment (default: mirror.lan).
+# For LAN-only use without a real domain, Caddy issues an internal CA cert;
+# install Caddy's root cert on clients, or use the plain-HTTP run-on-synology.sh path.
+
+{$MIRROR_HOST} {
+	encode zstd gzip
+
+	# Range requests and streaming downloads must pass through untouched.
+	request_body {
+		max_size -1
+	}
+
+	# Reverse proxy to the shim. Preserve Host and Range headers.
+	reverse_proxy {$SHIM_UPSTREAM} {
+		# Flush immediately so large file streams are not buffered.
+		flush_interval -1
+		header_up Host {host}
+		header_up Range {http.range}
+	}
+
+	# Long timeouts for big model downloads.
+	transport http {
+		read_timeout 600s
+		write_timeout 600s
+		dial_timeout 30s
+	}
+}
+
+# Fallback: serve on :80 redirecting to HTTPS (Caddy does this automatically
+# when a site block has a hostname). For a plain HTTP listener with no TLS
+# (e.g. quick LAN testing), add:
+#
+# :8080 {
+#     reverse_proxy {$SHIM_UPSTREAM}
+# }

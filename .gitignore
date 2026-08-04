@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+
+# Local mirror store (never commit model blobs or runtime state)
+/data/
+/mirror-root/
+*.sqlite
+*.sqlite-*
+
+# Env
+.env
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# ZCode session artifacts
+.zcode/

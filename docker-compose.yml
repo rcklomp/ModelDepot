@@ -1,0 +1,45 @@
+# Primary deployment: Caddy (TLS/HTTP2/compression/Range) -> FastAPI shim.
+# Usage:
+#   docker compose up
+# Then point clients at:  HF_ENDPOINT=https://mirror.lan  HF_HUB_DISABLE_XET=1
+#
+# The mirror store is a bind-mounted directory — move it to a NAS/SSD by
+# changing MIRROR_ROOT on the host; the container is stateless.
+
+services:
+  shim:
+    build: .
+    image: llm-repo:latest
+    restart: unless-stopped
+    environment:
+      MIRROR_ROOT: /data/mirror-root
+      MIRROR_BASE_URL: https://${MIRROR_HOST:-mirror.lan}
+      MIRROR_PUBLIC_URL: https://${MIRROR_HOST:-mirror.lan}
+      MIRROR_READ_ONLY: ${MIRROR_READ_ONLY:-0}
+      MIRROR_AUTH_TOKEN: ${MIRROR_AUTH_TOKEN:-}
+      MIRROR_INDEX_BACKEND: ${MIRROR_INDEX_BACKEND:-sqlite}
+    volumes:
+      - ${MIRROR_ROOT:-./data/mirror-root}:/data/mirror-root
+    # Internal only; Caddy fronts it.
+    expose:
+      - "8000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - shim
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      MIRROR_HOST: ${MIRROR_HOST:-mirror.lan}
+      SHIM_UPSTREAM: shim:8000
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
