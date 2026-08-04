@@ -169,3 +169,91 @@ def test_manifest_files_sorted(repo: RepositoryCore, tmp_path: Path):
 
     manifest = repo.get_manifest("o/r", "main")
     assert [f.path for f in manifest.files] == ["a.txt", "m.txt", "z.txt"]
+
+
+# ---- shard-completeness guard ----------------------------------------
+
+def _make_sharded_snapshot(repo_id: str, commit: str, staging: Path,
+                           shard_names: list[str]) -> StagedSnapshot:
+    """Build a snapshot with the given shard filenames (1 byte each)."""
+    files: dict[str, bytes] = {name: b"x" for name in shard_names}
+    return _make_snapshot(repo_id, commit, staging, files)
+
+
+def test_complete_shards_ingest_ok(repo: RepositoryCore, tmp_path: Path):
+    """All 4 shards present -> publishes normally, no error."""
+    staging = tmp_path / "s"; staging.mkdir()
+    snap = _make_sharded_snapshot("o/r", "a" * 40, staging, [
+        "model-00001-of-00004.gguf",
+        "model-00002-of-00004.gguf",
+        "model-00003-of-00004.gguf",
+        "model-00004-of-00004.gguf",
+    ])
+    result = transaction.ingest(repo, snap)
+    assert result.published
+    assert result.file_count == 4
+
+
+def test_partial_shards_refused(repo: RepositoryCore, tmp_path: Path):
+    """Only 2 of 4 shards -> IncompleteShards raised, nothing published."""
+    staging = tmp_path / "s"; staging.mkdir()
+    snap = _make_sharded_snapshot("o/r", "b" * 40, staging, [
+        "model-00001-of-00004.gguf",
+        "model-00002-of-00004.gguf",
+        # 00003 and 00004 missing
+    ])
+    with pytest.raises(transaction.IncompleteShards) as exc_info:
+        transaction.ingest(repo, snap)
+    err = exc_info.value
+    assert err.have == 2
+    assert err.declared == 4
+    assert "00003" in err.missing[0] and "00004" in err.missing[1]
+    # Nothing was published.
+    assert repo.list_revisions("o/r") == []
+
+
+def test_partial_shards_override_publishes(repo: RepositoryCore, tmp_path: Path):
+    """--allow-incomplete-shards publishes the partial set with a warning."""
+    staging = tmp_path / "s"; staging.mkdir()
+    snap = _make_sharded_snapshot("o/r", "c" * 40, staging, [
+        "DeepSeek-V4-UD-IQ3_XXS-00001-of-00004.gguf",
+        "DeepSeek-V4-UD-IQ3_XXS-00002-of-00004.gguf",
+    ])
+    result = transaction.ingest(repo, snap, allow_incomplete_shards=True)
+    assert result.published
+    assert result.file_count == 2
+
+
+def test_non_sharded_files_unaffected(repo: RepositoryCore, tmp_path: Path):
+    """Normal (non-sharded) filenames never trigger the guard."""
+    staging = tmp_path / "s"; staging.mkdir()
+    snap = _make_snapshot("o/r", "d" * 40, staging, {
+        "config.json": b"{}", "model.safetensors": b"weights", "tokenizer.json": b"tok",
+    })
+    result = transaction.ingest(repo, snap)  # no error
+    assert result.file_count == 3
+
+
+def test_single_file_not_treated_as_shard(repo: RepositoryCore, tmp_path: Path):
+    """A '-of-00001' file (total=1) is not a real shard; no guard triggered."""
+    staging = tmp_path / "s"; staging.mkdir()
+    snap = _make_sharded_snapshot("o/r", "e" * 40, staging, [
+        "model-00001-of-00001.gguf",
+    ])
+    result = transaction.ingest(repo, snap)  # no error
+    assert result.file_count == 1
+
+
+def test_multiple_shard_groups_checked_independently(repo: RepositoryCore, tmp_path: Path):
+    """Two different sharded models in one snapshot — each must be complete."""
+    staging = tmp_path / "s"; staging.mkdir()
+    # Model A complete (2/2), Model B incomplete (1/3).
+    snap = _make_sharded_snapshot("o/r", "f" * 40, staging, [
+        "a-00001-of-00002.gguf", "a-00002-of-00002.gguf",
+        "b-00001-of-00003.gguf",
+    ])
+    with pytest.raises(transaction.IncompleteShards) as exc_info:
+        transaction.ingest(repo, snap)
+    # The error should be about model b (the incomplete one).
+    assert exc_info.value.declared == 3
+    assert exc_info.value.have == 1

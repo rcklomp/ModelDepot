@@ -54,10 +54,33 @@ class IntegrityMismatch(IngestError):
         self.actual = actual
 
 
+class IncompleteShards(IngestError):
+    """A sharded model is being published with some shards missing.
+
+    Engines (llama.cpp, etc.) discover sibling shards by filtering the file list
+    at load time; a partial shard set causes a late, confusing failure inside
+    the engine rather than at ingest time. We refuse by default and require an
+    explicit opt-in to publish a partial shard set.
+    """
+    def __init__(self, prefix: str, have: int, declared: int, missing: list[str]):
+        super().__init__(
+            f"incomplete shard set for '{prefix}': have {have}/{declared} shards. "
+            f"Missing: {', '.join(missing[:5])}"
+            + (" ..." if len(missing) > 5 else "")
+            + "\n  Re-run with the full quant's files (e.g. --allow '<quant>/*'), "
+            "or pass --allow-incomplete-shards to publish anyway."
+        )
+        self.prefix = prefix
+        self.have = have
+        self.declared = declared
+        self.missing = missing
+
+
 def ingest(repo: RepositoryCore, snapshot: StagedSnapshot, *,
            source_kind: str = "huggingface", source_ref: str | None = None,
            ref_name: str = "main", license_name: str | None = None,
-           update_ref: bool = True) -> IngestResult:
+           update_ref: bool = True,
+           allow_incomplete_shards: bool = False) -> IngestResult:
     """Publish a staged snapshot as a new immutable revision.
 
     Steps (each emits an event):
@@ -69,11 +92,20 @@ def ingest(repo: RepositoryCore, snapshot: StagedSnapshot, *,
          making re-ingest of the same commit idempotent).
       5. Optionally move `ref_name` to the new commit.
 
-    Returns an IngestResult. Raises IntegrityMismatch / IngestError.
+    Shard completeness: if the snapshot contains a sharded model (filenames
+    matching '<prefix>-NNNNN-of-NNNNN') with some shards missing, this raises
+    IncompleteShards — a partial shard set is silently broken at load time, so
+    we refuse it unless allow_incomplete_shards=True.
+
+    Returns an IngestResult. Raises IntegrityMismatch / IncompleteShards / IngestError.
     """
     repo_id = snapshot.repo_id
     commit = snapshot.commit
     repo.repository_created(repo_id)
+
+    # Refuse a partial shard set unless explicitly overridden.
+    if not allow_incomplete_shards:
+        _check_shard_completeness(snapshot.files)
 
     file_entries: list[FileEntry] = []
     for staged in snapshot.files:
@@ -147,6 +179,45 @@ def _store_one(repo: RepositoryCore, staged: StagedFile) -> tuple[str, str]:
     raise IngestError(
         f"staged file vanished and blob sha256:{expected} is not present: {staged.path}"
     )
+
+
+# Shard pattern matches the one llama.cpp uses (get_gguf_split_info):
+#   <prefix>-NNNNN-of-NNNNN.<ext>
+# e.g. 'model-00001-of-00004.gguf', 'DeepSeek-V4-...-00002-of-00004.gguf'.
+_SHARD_RE = __import__("re").compile(r"^(.+)-([0-9]{5})-of-([0-9]{5})(\.[^.]+)?$")
+
+
+def _check_shard_completeness(files: list[StagedFile]) -> None:
+    """Raise IncompleteShards if any sharded model is missing sibling shards.
+
+    Groups shard files by their prefix and declared total, then verifies every
+    index 1..total is present. Non-sharded files are ignored. This catches the
+    common footgun of ingesting only some shards of a multi-shard model, which
+    would otherwise succeed silently and fail confusingly at load time.
+    """
+    # Build a map: (prefix, total, ext) -> set of indices present.
+    groups: dict[tuple[str, int, str], set[int]] = {}
+    for f in files:
+        m = _SHARD_RE.match(__import__("os").path.basename(f.path))
+        if not m:
+            continue
+        prefix, index, total, ext = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4) or ""
+        groups.setdefault((prefix, total, ext), set()).add(index)
+
+    for (prefix, total, ext), indices in groups.items():
+        if total <= 1:
+            continue  # not actually sharded
+        have = sorted(indices)
+        expected = set(range(1, total + 1))
+        missing_idx = sorted(expected - indices)
+        if not missing_idx:
+            continue  # complete
+        # Reconstruct the missing filenames for a helpful error.
+        missing_names = [f"{prefix}-{i:05d}-of-{total:05d}{ext}" for i in missing_idx]
+        raise IncompleteShards(
+            prefix=f"{prefix}-...-of-{total:05d}{ext}",
+            have=len(have), declared=total, missing=missing_names,
+        )
 
 
 def _to_file_entry(staged: StagedFile, blob_ref: str, digest: str,

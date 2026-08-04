@@ -57,6 +57,9 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="local reference name to point at the new commit")
     hf.add_argument("--no-update-ref", action="store_true",
                     help="publish the revision without moving the ref")
+    hf.add_argument("--allow-incomplete-shards", action="store_true",
+                    help="publish even if a sharded model is missing some shards "
+                         "(normally refused — partial shards fail at load time)")
     hf.add_argument("--license", default=None, help="license name to record")
     hf.add_argument("--endpoint", default=os.environ.get("HF_ENDPOINT", ""),
                     help="HF endpoint (default: $HF_ENDPOINT or huggingface.co)")
@@ -83,6 +86,8 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="local reference name to point at the new commit")
     cv.add_argument("--no-update-ref", action="store_true",
                     help="publish without moving the ref")
+    cv.add_argument("--allow-incomplete-shards", action="store_true",
+                    help="publish even if a sharded model is missing some shards")
     cv.set_defaults(func=_cmd_ingest_civitai)
 
     # ---- list ----
@@ -154,6 +159,7 @@ def _cmd_ingest_hf(args) -> int:
         result = transaction.ingest(
             repo, snapshot, ref_name=args.ref, license_name=args.license,
             update_ref=not args.no_update_ref,
+            allow_incomplete_shards=args.allow_incomplete_shards,
         )
         print(f"  {'published' if result.published else 'already present'} "
               f"revision {result.commit} ({result.file_count} files)")
@@ -208,6 +214,7 @@ def _cmd_ingest_civitai(args) -> int:
             source_ref=civitai_source.civitai_source_url(snap.model_id, snap.version_id),
             ref_name=args.ref, license_name=snap.license_name,
             update_ref=not args.no_update_ref,
+            allow_incomplete_shards=args.allow_incomplete_shards,
         )
         print(f"  {'published' if result.published else 'already present'} "
               f"revision {result.commit} ({result.file_count} files)")
