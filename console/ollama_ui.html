@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Repo — Model Manager</title>
+<style>
+  :root {
+    --bg: #0f0f0f; --surface: #1a1a1a; --surface2: #242424;
+    --border: #333; --text: #e0e0e0; --text-dim: #888;
+    --accent: #d97757; --accent-dim: #a05a3e;
+    --green: #4ade80; --red: #f87171; --yellow: #fbbf24;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.6;
+    padding: 20px; max-width: 1100px; margin: 0 auto;
+  }
+  h1 { font-size: 1.5rem; margin-bottom: 4px; }
+  .subtitle { color: var(--text-dim); font-size: 0.85rem; margin-bottom: 24px; }
+  .section { margin-bottom: 32px; }
+  .section-title {
+    font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--text-dim); margin-bottom: 12px; border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+  }
+
+  /* Mirror catalog */
+  .model-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px; margin-bottom: 10px;
+    display: flex; align-items: center; gap: 16px;
+  }
+  .model-card:hover { border-color: var(--accent-dim); }
+  .model-info { flex: 1; }
+  .model-name { font-weight: 600; font-size: 0.95rem; }
+  .model-meta { font-size: 0.78rem; color: var(--text-dim); margin-top: 2px; }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+    margin-left: 8px;
+  }
+  .badge-gguf { background: #1e3a5f; color: #60a5fa; }
+  .badge-safetensors { background: #3b1e5f; color: #c084fc; }
+  .badge-gguf-l { background: #1e3a5f; color: #60a5fa; }
+  .badge-loaded { background: #14532d; color: var(--green); }
+
+  .file-list { margin-top: 8px; }
+  .file-row {
+    display: flex; align-items: center; gap: 12px; padding: 6px 0;
+    font-size: 0.82rem;
+  }
+  .file-path { flex: 1; color: var(--text-dim); font-family: monospace; }
+  .file-size { color: var(--text-dim); min-width: 80px; text-align: right; }
+
+  .btn {
+    padding: 6px 14px; border-radius: 6px; border: none; cursor: pointer;
+    font-size: 0.8rem; font-weight: 600; transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .btn-load { background: var(--accent); color: white; }
+  .btn-load:hover { background: var(--accent-dim); }
+  .btn-load:disabled { background: var(--surface2); color: var(--text-dim); cursor: default; }
+  .btn-remove { background: transparent; border: 1px solid var(--red); color: var(--red); }
+  .btn-remove:hover { background: var(--red); color: white; }
+
+  /* Ollama models */
+  .ollama-row {
+    display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    margin-bottom: 6px; font-size: 0.88rem;
+  }
+  .ollama-name { flex: 1; font-family: monospace; }
+  .ollama-size { color: var(--text-dim); font-size: 0.8rem; }
+
+  /* Status messages */
+  .toast {
+    position: fixed; bottom: 20px; right: 20px; padding: 12px 20px;
+    border-radius: 8px; font-size: 0.85rem; z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4); transition: opacity 0.3s;
+  }
+  .toast-success { background: #14532d; color: var(--green); border: 1px solid var(--green); }
+  .toast-error { background: #451a1a; color: var(--red); border: 1px solid var(--red); }
+  .toast-loading { background: var(--surface2); color: var(--yellow); border: 1px solid var(--yellow); }
+
+  .loading { opacity: 0.5; pointer-events: none; }
+  .spinner {
+    display: inline-block; width: 14px; height: 14px;
+    border: 2px solid var(--text-dim); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<h1>🧠 LLM Repo — Model Manager</h1>
+<p class="subtitle">Load models from the mirror into Ollama. Zero copy — blobs stay on NVMe.</p>
+
+<div class="section">
+  <div class="section-title">In Ollama now</div>
+  <div id="ollama-list"><span class="spinner"></span></div>
+</div>
+
+<div class="section">
+  <div class="section-title">Mirror catalog — click to load into Ollama</div>
+  <div id="catalog"><span class="spinner"></span></div>
+</div>
+
+<div id="toast" style="display:none"></div>
+
+<script>
+const API = '';
+const loadedModels = new Set();
+
+async function init() {
+  await refreshOllama();
+  await refreshCatalog();
+}
+
+async function refreshOllama() {
+  try {
+    const r = await fetch(`${API}/api/console/ollama/models`);
+    const d = await r.json();
+    loadedModels.clear();
+    d.models.forEach(m => loadedModels.add(m.name));
+    const el = document.getElementById('ollama-list');
+    if (d.models.length === 0) {
+      el.innerHTML = '<div style="color:var(--text-dim);padding:8px">No models loaded yet.</div>';
+      return;
+    }
+    el.innerHTML = d.models.map(m => `
+      <div class="ollama-row">
+        <span class="ollama-name">🟢 ${m.name}</span>
+        <span class="ollama-size">${m.size}</span>
+        <button class="btn btn-remove" onclick="removeModel('${m.name}')">Remove</button>
+      </div>
+    `).join('');
+  } catch (e) {
+    document.getElementById('ollama-list').innerHTML = '<div style="color:var(--red)">Failed to load.</div>';
+  }
+}
+
+async function refreshCatalog() {
+  try {
+    const r = await fetch(`${API}/api/console/catalog`);
+    const items = await r.json();
+    const el = document.getElementById('catalog');
+    if (!items || items.length === 0) {
+      el.innerHTML = '<div style="color:var(--text-dim);padding:8px">Mirror is empty.</div>';
+      return;
+    }
+    // Fetch detail for each to get file list
+    const detailed = await Promise.all(items.map(async item => {
+      const dr = await fetch(`${API}/api/console/models/${item.repo_id}`);
+      return dr.ok ? await dr.json() : null;
+    }));
+
+    el.innerHTML = items.map((item, i) => {
+      const detail = detailed[i];
+      const type = item.type || 'unknown';
+      const loaded = loadedModels.has(slugify(item.repo_id));
+      const files = detail && detail.revisions && detail.revisions[0]
+        ? detail.revisions[0].files : [];
+      const ggufFiles = files.filter(f => f.path.endsWith('.gguf'));
+
+      return `
+        <div class="model-card">
+          <div class="model-info">
+            <div class="model-name">
+              ${item.repo_id}
+              <span class="badge badge-${type}">${type}</span>
+              ${loaded ? '<span class="badge badge-loaded">in ollama</span>' : ''}
+            </div>
+            <div class="model-meta">${formatSize(item.total_size_bytes || 0)}</div>
+            ${ggufFiles.length > 0 ? `
+              <div class="file-list">
+                ${ggufFiles.map(f => `
+                  <div class="file-row">
+                    <span class="file-path">${f.path.split('/').pop()}</span>
+                    <span class="file-size">${formatSize(f.size)}</span>
+                    <button class="btn btn-load" onclick="loadModel('${item.repo_id}','${f.path}')">
+                      Load into Ollama
+                    </button>
+                  </div>
+                `).join('')}
+              </div>
+            ` : `<div class="model-meta" style="margin-top:4px">No GGUF files (safetensors — use vLLM or convert first)</div>`}
+          </div>
+        </div>
+      `;
+    }).join('');
+  } catch (e) {
+    document.getElementById('catalog').innerHTML = '<div style="color:var(--red)">Failed to load catalog.</div>';
+  }
+}
+
+async function loadModel(repoId, filePath) {
+  const modelName = slugify(repoId);
+  toast(`Loading ${modelName} from mirror (zero copy)...`, 'loading');
+  try {
+    const r = await fetch(`${API}/api/console/ollama/load`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({repo_id: repoId, file_path: filePath, model_name: modelName})
+    });
+    const d = await r.json();
+    if (d.ok) {
+      toast(`✓ ${modelName} loaded into Ollama!`, 'success');
+      await refreshOllama();
+      await refreshCatalog();
+    } else {
+      toast(`✗ ${d.detail || 'Failed'}`, 'error');
+    }
+  } catch (e) {
+    toast(`✗ Error: ${e.message}`, 'error');
+  }
+}
+
+async function removeModel(name) {
+  if (!confirm(`Remove ${name} from Ollama? (Mirror blob is kept.)`)) return;
+  toast(`Removing ${name}...`, 'loading');
+  try {
+    const r = await fetch(`${API}/api/console/ollama/models/${name}`, {method: 'DELETE'});
+    if (r.ok) {
+      toast(`✓ ${name} removed`, 'success');
+      await refreshOllama();
+      await refreshCatalog();
+    } else {
+      toast('✗ Failed to remove', 'error');
+    }
+  } catch (e) {
+    toast(`✗ ${e.message}`, 'error');
+  }
+}
+
+function slugify(s) {
+  return s.split('/').pop().toLowerCase()
+    .replace(/[^a-z0-9.-]/g, '-').replace(/-+/g, '-');
+}
+function formatSize(bytes) {
+  if (bytes < 1e6) return (bytes/1e3).toFixed(0) + ' KB';
+  if (bytes < 1e9) return (bytes/1e6).toFixed(0) + ' MB';
+  return (bytes/1e9).toFixed(1) + ' GB';
+}
+function toast(msg, type) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = `toast toast-${type}`;
+  el.style.display = 'block';
+  if (type !== 'loading') setTimeout(() => el.style.opacity = '0', 3000);
+  else el.style.opacity = '1';
+}
+
+init();
+</script>
+</body>
+</html>

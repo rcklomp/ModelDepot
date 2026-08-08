@@ -109,15 +109,20 @@ def create_app() -> FastAPI:
     app.include_router(ops_router(state))
     app.include_router(ollama_router(state))
 
+    # ---- serve the management UI -------------------------------------
+    from pathlib import Path as _Path
+    from fastapi.responses import HTMLResponse, FileResponse
+
+    ui_path = _Path(__file__).parent / "ollama_ui.html"
+
+    @app.get("/", response_class=HTMLResponse)
+    async def ui():
+        return FileResponse(ui_path)
+
     # ---- serve the built SPA (if present) ----------------------------
     if settings.web_dist and settings.web_dist.is_dir():
         app.mount("/ui", StaticFiles(directory=str(settings.web_dist), html=True),
                   name="ui")
-
-        @app.get("/")
-        async def index():
-            from fastapi.responses import RedirectResponse
-            return RedirectResponse(url="/ui/")
 
     return app
 
