@@ -118,6 +118,26 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="for gc: report only, don't delete")
     jb.set_defaults(func=_cmd_jobs)
 
+    # ---- ingest local ----
+    lc = sub.add_parser("ingest-local",
+                        help="ingest a local directory of model files (GGUF, safetensors, etc.)")
+    lc.add_argument("repo_id",
+                    help="repository id to publish as (e.g. 'Huihui/Qwen3.6-35B-GGUF')")
+    lc.add_argument("path", help="local directory containing the model files")
+    lc.add_argument("--ref", default="main",
+                    help="local reference name to point at the new commit")
+    lc.add_argument("--no-update-ref", action="store_true",
+                    help="publish without moving the ref")
+    lc.add_argument("--allow-incomplete-shards", action="store_true",
+                    help="publish even if a sharded model is missing some shards")
+    lc.add_argument("--license", default=None, help="license name to record")
+    lc.add_argument("--include", action="append", default=None,
+                    help="glob pattern to include (repeatable). Default: all files.")
+    lc.add_argument("--exclude", action="append", default=None,
+                    help="glob pattern to exclude (repeatable). "
+                         "Default: common junk files (.DS_Store, .cache/, etc.)")
+    lc.set_defaults(func=_cmd_ingest_local)
+
     return p
 
 
@@ -177,6 +197,117 @@ def _cmd_ingest_hf(args) -> int:
         else:
             print(f"  (staging kept at {staging} — re-run to resume)",
                   file=_sys.stderr)
+    return 0
+
+
+def _cmd_ingest_local(args) -> int:
+    """Ingest a local directory of model files into the mirror store.
+
+    Unlike ingest-hf (which downloads from HuggingFace), this works with files
+    already on disk — GGUF exports from LM Studio, manually downloaded models,
+    safetensors, etc. Files are content-addressed (sha256) into the blob store
+    just like HF ingests; the only difference is the source is a local path
+    instead of an HTTP download.
+    """
+    import fnmatch
+    import uuid
+    from .hf_source import StagedFile, StagedSnapshot
+    from . import transaction
+
+    settings = load_settings()
+    storage = FilesystemStorage(settings)
+    storage.ensure_layout()
+    event_log = events.EventLog(storage.events_path)
+    repo = RepositoryCore(storage, event_log)
+
+    src = Path(args.path).resolve()
+    if not src.is_dir():
+        print(f"error: {src} is not a directory", file=sys.stderr)
+        return 1
+
+    # Default exclusions: junk files we never want in the store.
+    default_exclude = [".DS_Store", ".cache", ".cache/**", "*.tmp",
+                       "__pycache__", "__pycache__/**"]
+    excludes = args.exclude or default_exclude
+    includes = args.include or ["*"]
+
+    # Collect matching files (relative paths, sorted for determinism).
+    # Note: fnmatch treats ** the same as *, so '*' matches everything
+    # (both flat and nested relative paths). For targeted includes, users
+    # can pass e.g. --include '*.gguf' (matches at any depth via fnmatch).
+    all_files = []
+    for f in sorted(src.rglob("*")):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(src).as_posix()
+        basename = f.name
+        # Apply includes — match against both the full relative path and basename
+        # so '*.gguf' works for files at any depth.
+        if not any(fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(basename, pat)
+                   for pat in includes):
+            continue
+        # Apply excludes — match against full path, basename, and any parent dir
+        # (relative to src, so a source under ~/.cache doesn't self-exclude)
+        rel_parts = Path(rel).parts
+        if any(fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(basename, pat)
+               or any(fnmatch.fnmatch(part, pat.rstrip("/*")) for part in rel_parts)
+               for pat in excludes):
+            continue
+        all_files.append((rel, f))
+
+    if not all_files:
+        print(f"error: no files found in {src} matching the criteria", file=sys.stderr)
+        return 1
+
+    total_size = sum(f.stat().st_size for _, f in all_files)
+    print(f"ingesting {len(all_files)} file(s) ({total_size / 1e9:.2f} GB) "
+          f"from {src}")
+    print(f"  repo_id: {args.repo_id}")
+    for rel, f in all_files:
+        print(f"    {f.stat().st_size / 1e6:8.1f} MB  {rel}")
+
+    # Build a StagedSnapshot. We use a synthetic commit (deterministic from the
+    # file list + sizes) so re-ingesting the same files is idempotent.
+    import hashlib
+    commit_input = "|".join(f"{r}:{s}" for r, (s, _) in
+                            zip([r for r, _ in all_files], all_files))
+    commit = hashlib.sha256(commit_input.encode()).hexdigest()[:40]
+
+    # StagedFile requires local_path to exist; we point directly at the source
+    # files (no copy needed — the transaction module reads + hashes them).
+    staged_files = []
+    for rel, f in all_files:
+        staged_files.append(StagedFile(
+            path=rel,
+            local_path=f,
+            size=f.stat().st_size,
+            etag=f'local-{commit[:16]}',   # synthetic, non-empty
+            sha256=None,                    # let transaction compute it
+        ))
+
+    snapshot = StagedSnapshot(
+        repo_id=args.repo_id,
+        revision_requested="local",
+        commit=commit,
+        staging_dir=src,
+        files=staged_files,
+    )
+
+    result = transaction.ingest(
+        repo, snapshot,
+        source_kind="local",
+        source_ref=f"file://{src}",
+        ref_name=args.ref,
+        license_name=args.license,
+        update_ref=not args.no_update_ref,
+        allow_incomplete_shards=args.allow_incomplete_shards,
+    )
+    print(f"\n  {'published' if result.published else 'already present'} "
+          f"revision {result.commit} ({result.file_count} files)")
+    if result.ref_updated:
+        print(f"  {args.ref} -> {result.commit}")
+    print(f"  serve at: /{args.repo_id}/resolve/{args.ref}/<file>")
+    print("done.")
     return 0
 
 
