@@ -15,8 +15,9 @@
 # Run as root (sudo), once. Re-running updates the code and restarts the service.
 #
 # Usage:
-#   sudo ./scripts/run-on-synology.sh /volume1/llm-mirror   # store path (arg 1)
-#   sudo ./scripts/run-on-synology.sh /volume1/llm-mirror 8000  # port (arg 2)
+#   sudo ./scripts/run-on-synology.sh /volume1/llm-mirror            # store path (arg 1)
+#   sudo ./scripts/run-on-synology.sh /volume1/llm-mirror 8000       # + port (arg 2)
+#   sudo ./scripts/run-on-synology.sh /volume1/llm-mirror 8000 llm-svc  # + run as user (arg 3)
 #
 # After install, the mirror auto-starts on boot. To control it manually:
 #   /usr/local/etc/rc.d/S99llm-repo.sh {start|stop|restart|status}
@@ -27,10 +28,17 @@ set -euo pipefail
 # ---- config -----------------------------------------------------------
 STORE="${1:-/volume1/llm-mirror}"
 PORT="${2:-8000}"
+RUN_USER="${3:-}"                          # user to run the server as (empty = root)
 APP_DIR="/volume1/@appdata/llm-repo"      # app code + venv live here
 VENV="$APP_DIR/venv"
 SERVICE="/usr/local/etc/rc.d/S99llm-repo.sh"
 PYTHON_BIN=""                              # resolved below
+
+# If a run user is specified, ensure the app dir and store are owned by them.
+if [[ -n "$RUN_USER" ]]; then
+    log "service will run as user: $RUN_USER"
+    chown -R "$RUN_USER" "$APP_DIR" "$STORE" 2>/dev/null || true
+fi
 
 log()  { echo "[run-on-synology] $*"; }
 die()  { echo "[run-on-synology] ERROR: $*" >&2; exit 1; }
@@ -102,6 +110,14 @@ PORT="$PORT"
 PID_FILE="\$STORE/server.pid"
 LOG_FILE="\$STORE/log/server.log"
 PYTHON="\$VENV/bin/python"
+RUN_USER="$RUN_USER"
+
+# If RUN_USER is set, drop privileges for the server process
+if [[ -n "\$RUN_USER" ]]; then
+    AS_USER="sudo -u \$RUN_USER"
+else
+    AS_USER=""
+fi
 
 start() {
     if [[ -f "\$PID_FILE" ]] && kill -0 "\$(cat "\$PID_FILE")" 2>/dev/null; then
@@ -109,12 +125,13 @@ start() {
         return 0
     fi
     mkdir -p "\$(dirname "\$LOG_FILE")"
+    chown -R "\$RUN_USER" "\$STORE" 2>/dev/null || true
     echo "starting llm-repo on port \$PORT, store=\$STORE"
     MIRROR_ROOT="\$STORE" \\
     MIRROR_HOST=0.0.0.0 \\
     MIRROR_PORT="\$PORT" \\
     MIRROR_INDEX_BACKEND=none \\
-    nohup "\$PYTHON" -m uvicorn server.main:app \\
+    \$AS_USER nohup "\$PYTHON" -m uvicorn server.main:app \\
         --host 0.0.0.0 --port "\$PORT" --workers 1 \\
         >> "\$LOG_FILE" 2>&1 &
     echo \$! > "\$PID_FILE"
