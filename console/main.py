@@ -103,9 +103,11 @@ def create_app() -> FastAPI:
     from .ingest_api import create_router as ingest_router
     from .jobs_api import create_router as jobs_router
     from .ops_api import create_router as ops_router
+    from .ollama_api import create_router as ollama_router
     app.include_router(ingest_router(state))
     app.include_router(jobs_router(state))
     app.include_router(ops_router(state))
+    app.include_router(ollama_router(state))
 
     # ---- serve the built SPA (if present) ----------------------------
     if settings.web_dist and settings.web_dist.is_dir():
