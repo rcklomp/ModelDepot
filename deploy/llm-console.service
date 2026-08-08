@@ -1,0 +1,21 @@
+[Unit]
+Description=LLM Repository Console (model management: catalog, ingest, ollama)
+After=network.target llm-repo.service
+
+[Service]
+Type=simple
+User=ronald
+Environment=MIRROR_ROOT=/home/ronald/llm-mirror
+Environment=MIRROR_HOST=0.0.0.0
+Environment=MIRROR_PORT=8002
+Environment=MIRROR_BASE_URL=http://10.0.10.228:8001
+Environment=MIRROR_PUBLIC_URL=http://10.0.10.228:8001
+Environment=CONSOLE_PORT=8002
+Environment=PATH=/usr/local/bin:/opt/rocm/bin:/usr/bin:/bin:/home/ronald/.local/share/micromamba/envs/mirror/bin
+WorkingDirectory=/home/ronald/LLM_repo
+ExecStart=/home/ronald/.local/share/micromamba/envs/mirror/bin/python -m uvicorn console.main:app --host 0.0.0.0 --port 8002 --workers 1
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
