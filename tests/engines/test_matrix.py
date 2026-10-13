@@ -53,7 +53,7 @@ def client(mirror_root: Path):
     stage_fake_repo(repo)
     from server.main import create_app
     app = create_app(settings_override=settings, repo_override=repo)
-    with TestClient(app) as c:
+    with TestClient(app, headers={"X-Console-Request": "1"}) as c:
         yield c
 
 

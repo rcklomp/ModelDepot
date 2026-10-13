@@ -40,7 +40,7 @@ def test_ingest_hf_via_http_with_stubbed_source(console_app, monkeypatch):
         )
     monkeypatch.setattr("console.ingest_api.hf_source.fetch", fake_fetch)
 
-    with TestClient(app) as c:
+    with TestClient(app, headers={"X-Console-Request": "1"}) as c:
         r = c.post("/api/console/ingest", json={
             "source": "hf", "repo_id": "fakeorg/model", "revision": "main",
         })
@@ -65,7 +65,7 @@ def test_ingest_records_failure(console_app, monkeypatch):
         raise RuntimeError("simulated network failure")
     monkeypatch.setattr("console.ingest_api.hf_source.fetch", fake_fetch)
 
-    with TestClient(app) as c:
+    with TestClient(app, headers={"X-Console-Request": "1"}) as c:
         r = c.post("/api/console/ingest", json={
             "source": "hf", "repo_id": "broken/model",
         })
@@ -89,7 +89,7 @@ def test_list_jobs(populated_console, monkeypatch):
                               files=[StagedFile(path="f.txt", local_path=p, size=1, etag=sha, sha256=sha)])
     monkeypatch.setattr("console.ingest_api.hf_source.fetch", fake_fetch)
 
-    with TestClient(app) as c:
+    with TestClient(app, headers={"X-Console-Request": "1"}) as c:
         c.post("/api/console/ingest", json={"source": "hf", "repo_id": "a/b"})
         c.post("/api/console/ingest", json={"source": "hf", "repo_id": "c/d"})
         jobs = c.get("/api/console/jobs").json()
@@ -100,14 +100,14 @@ def test_list_jobs(populated_console, monkeypatch):
 
 def test_job_404(console_app):
     app, _ = console_app
-    with TestClient(app) as c:
+    with TestClient(app, headers={"X-Console-Request": "1"}) as c:
         r = c.get("/api/console/jobs/nonexistent")
     assert r.status_code == 404
 
 
 def test_ops_verify(populated_console):
     app, _ = populated_console
-    with TestClient(app) as c:
+    with TestClient(app, headers={"X-Console-Request": "1"}) as c:
         r = c.post("/api/console/ops/verify")
     assert r.status_code == 200
     body = r.json()
@@ -119,7 +119,7 @@ def test_ops_gc_dry_run(populated_console):
     app, state = populated_console
     # Drop an orphan blob so GC has something to find.
     state.repo.put_blob_bytes(b"orphan-not-referenced")
-    with TestClient(app) as c:
+    with TestClient(app, headers={"X-Console-Request": "1"}) as c:
         r = c.post("/api/console/ops/gc", json={"dry_run": True})
     body = r.json()
     assert body["dry_run"] is True
@@ -130,7 +130,7 @@ def test_ops_gc_deletes(populated_console):
     app, state = populated_console
     state.repo.put_blob_bytes(b"orphan")
     before = len(list(state.repo.iter_blobs()))
-    with TestClient(app) as c:
+    with TestClient(app, headers={"X-Console-Request": "1"}) as c:
         c.post("/api/console/ops/gc", json={"dry_run": False})
     after = len(list(state.repo.iter_blobs()))
     assert after == before - 1
@@ -138,6 +138,6 @@ def test_ops_gc_deletes(populated_console):
 
 def test_ingest_validates_source(console_app):
     app, _ = console_app
-    with TestClient(app) as c:
+    with TestClient(app, headers={"X-Console-Request": "1"}) as c:
         r = c.post("/api/console/ingest", json={"source": "bogus"})
     assert r.status_code == 400

@@ -27,6 +27,9 @@ def create_app() -> FastAPI:
     state = AppState(settings)
     app.state.state = state
 
+    from .guard import ConsoleGuard
+    app.add_middleware(ConsoleGuard)
+
     # ---- healthz ------------------------------------------------------
     @app.get("/api/console/healthz")
     async def healthz():
@@ -104,10 +107,12 @@ def create_app() -> FastAPI:
     from .jobs_api import create_router as jobs_router
     from .ops_api import create_router as ops_router
     from .ollama_api import create_router as ollama_router
+    from .franken_api import create_router as franken_router
     app.include_router(ingest_router(state))
     app.include_router(jobs_router(state))
     app.include_router(ops_router(state))
     app.include_router(ollama_router(state))
+    app.include_router(franken_router(state))
 
     # ---- serve the management UI -------------------------------------
     from pathlib import Path as _Path

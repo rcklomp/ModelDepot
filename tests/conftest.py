@@ -13,6 +13,8 @@ import pytest
 # Force a clean config before server.config is imported anywhere.
 os.environ.setdefault("MIRROR_ROOT", "/tmp/llm-repo-unused-default")
 os.environ.setdefault("MIRROR_INDEX_BACKEND", "sqlite")
+# console/guard.py: TestClient sends Host "testserver"
+os.environ.setdefault("CONSOLE_ALLOWED_HOSTS", "testserver,localhost,127.0.0.1,[::1]")
 
 
 @pytest.fixture

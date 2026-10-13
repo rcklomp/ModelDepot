@@ -91,20 +91,43 @@
     border-radius: 50%; animation: spin 0.8s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Franken engine */
+  .fr-status { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 12px; }
+  .fr-now { font-size: 1.05rem; font-weight: 600; }
+  .fr-meta { font-size: 0.8rem; color: var(--text-dim); margin-top: 4px; }
+  .fr-row { display: flex; align-items: center; gap: 14px; padding: 12px 16px; background: var(--surface);
+            border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; }
+  .fr-row.active { border-color: var(--green); }
+  .fr-row .model-info { flex: 1; }
+  .badge-warn { background: #451a03; color: var(--yellow); }
+  .btn-stop { background: transparent; border: 1px solid var(--yellow); color: var(--yellow); }
+  .btn-stop:hover { background: var(--yellow); color: #111; }
+  .fr-log { background: #000; border: 1px solid var(--border); border-radius: 6px; padding: 10px; margin-top: 10px;
+            font: 0.75rem/1.4 monospace; white-space: pre-wrap; max-height: 320px; overflow: auto; display: none; }
+  .vram { display: inline-block; width: 70px; height: 8px; background: var(--surface2); border-radius: 4px; vertical-align: middle; margin: 0 4px; }
+  .vram > i { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
 </style>
 </head>
 <body>
 
 <h1>🧠 LLM Repo — Model Manager</h1>
-<p class="subtitle">Load models from the mirror into Ollama. Zero copy — blobs stay on NVMe.</p>
+<p class="subtitle">Which model the Franken engine serves to Open WebUI, and the local model mirror.</p>
 
 <div class="section">
-  <div class="section-title">In Ollama now</div>
+  <div class="section-title">Franken engine — serving Open WebUI (port 8081)</div>
+  <div id="fr-status" class="fr-status"><span class="spinner"></span></div>
+  <div id="fr-models"></div>
+  <div id="fr-log" class="fr-log"></div>
+</div>
+
+<div class="section">
+  <div class="section-title">In Ollama now — Ollama only (Open WebUI does not use Ollama; the Franken engine cannot load these)</div>
   <div id="ollama-list"><span class="spinner"></span></div>
 </div>
 
 <div class="section">
-  <div class="section-title">Mirror catalog — click to load into Ollama</div>
+  <div class="section-title">Mirror catalog — "Load into Ollama" registers a model with Ollama only</div>
   <div id="catalog"><span class="spinner"></span></div>
 </div>
 
@@ -115,8 +138,98 @@ const API = '';
 const loadedModels = new Set();
 
 async function init() {
+  refreshFranken();
+  setInterval(refreshFranken, 5000);
   await refreshOllama();
   await refreshCatalog();
+}
+
+// ---- Franken engine -------------------------------------------------------------------------
+let frModels = [];
+let frBusy = false;
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const SERVING_TEXT = {
+  'none': 'Nothing — port 8081 is empty, Open WebUI has no Franken model',
+  'gateway-only': 'The gateway answers but no engine is behind it (starting, or broken)',
+  'alt': 'A llama.cpp test server (not the Franken engine)',
+  'colibri-glm': 'GLM-5.3 on the OLD Colibri engine',
+};
+
+async function refreshFranken() {
+  try {
+    if (!frModels.length) frModels = (await (await fetch(`${API}/api/console/franken/models`)).json()).models;
+    const r = await fetch(`${API}/api/console/franken/status`);
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || r.status);
+    renderFranken(d);
+  } catch (e) {
+    document.getElementById('fr-status').innerHTML = `<div style="color:var(--red)">Franken status unavailable: ${esc(e.message)}</div>`;
+  }
+}
+
+function renderFranken(d) {
+  const s = d.service || {};
+  const job = d.running || d.queued;
+  frBusy = !!job || !!s.rig_lock;
+  const m = frModels.find(x => x.action === s.serving);
+  const now = m ? `${esc(m.name)} <span class="badge badge-loaded">serving</span>` : esc(SERVING_TEXT[s.serving] || s.serving || 'unknown');
+  const vram = (s.vram_used_bytes || []).map((b, i) => b < 0 ? `card${i} ?` :
+      `card${i}<span class="vram"><i style="width:${Math.min(100, b / 24e9 * 100).toFixed(0)}%"></i></span>${(b / 1e9).toFixed(1)} GB`).join(' &nbsp; ');
+  let line2 = [];
+  if (s.model_ids && s.model_ids.length) line2.push(`Open WebUI sees: <b>${s.model_ids.map(esc).join(', ')}</b>`);
+  line2.push(s.reserved ? 'service OFF (the watchdog leaves the port empty)' : `service ON (the watchdog restarts ${esc(s.service_engine)} if it dies)`);
+  if (s.rig_lock) line2.push(`rig busy: ${esc(s.rig_lock)}`);
+  let jobHtml = '';
+  if (job) {
+    const when = d.running ? `running since ${esc(d.running.started_at)}` : 'queued, starts within a minute';
+    jobHtml = `<div class="fr-meta" style="color:var(--yellow)"><span class="spinner"></span> ${esc(job.action)}: ${when} — a switch takes several minutes (the model is read into memory, then one test chat)</div>`;
+  } else if (d.last) {
+    const ok = d.last.exit === 0;
+    jobHtml = `<div class="fr-meta">Last action: ${esc(d.last.action)} ${ok ? '<span style="color:var(--green)">succeeded</span>' : '<span style="color:var(--red)">FAILED</span>'} at ${esc(d.last.finished_at || '?')} — <a href="#" style="color:var(--accent)" onclick="showLog('${esc(d.last.id)}');return false">log</a></div>`;
+  }
+  document.getElementById('fr-status').innerHTML = `
+    <div class="fr-now">Now: ${now}</div>
+    <div class="fr-meta">${line2.join(' · ')}</div>
+    <div class="fr-meta">${vram}</div>
+    ${jobHtml}
+    <div style="margin-top:10px"><button class="btn btn-stop" ${frBusy || s.serving === 'none' ? 'disabled' : ''} onclick="frankenAction('stop')">Stop serving</button></div>`;
+  document.getElementById('fr-models').innerHTML = frModels.map(x => {
+    const active = x.action === s.serving;
+    return `<div class="fr-row ${active ? 'active' : ''}">
+      <div class="model-info">
+        <div class="model-name">${esc(x.name)} <span class="badge badge-gguf">${esc(x.model_id)}</span>
+          ${x.hardened ? '' : '<span class="badge badge-warn">not hardened</span>'}</div>
+        <div class="model-meta">${esc(x.detail)} · ${esc(x.speed)} · ${esc(x.note)}</div>
+      </div>
+      <button class="btn btn-load" ${frBusy || active ? 'disabled' : ''} onclick="frankenAction('${esc(x.action)}')">${active ? 'Serving' : 'Serve this'}</button>
+    </div>`;
+  }).join('');
+  if (d.running) showLog(d.running.id, true);
+}
+
+async function frankenAction(action) {
+  const m = frModels.find(x => x.action === action);
+  const what = action === 'stop' ? 'Stop serving? Open WebUI will have no Franken model until you start one.'
+    : `Serve ${m.name}? Whatever serves now stops first; Open WebUI chats wait until the switch is done (several minutes).`;
+  if (!confirm(what)) return;
+  try {
+    const r = await fetch(`${API}/api/console/franken/action`, {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Console-Request': '1'},
+      body: JSON.stringify({action})});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || r.status);
+    toast(`Queued: ${action === 'stop' ? 'stop' : m.name} — the rig starts it within a minute`, 'success');
+    refreshFranken();
+  } catch (e) { toast(`✗ ${e.message}`, 'error'); }
+}
+
+async function showLog(id, quiet) {
+  const el = document.getElementById('fr-log');
+  try {
+    const d = await (await fetch(`${API}/api/console/franken/log/${encodeURIComponent(id)}`)).json();
+    el.textContent = (d.lines || []).join('\n') || (quiet ? 'waiting for the rig to start the job…' : '(no log)');
+    el.style.display = 'block'; el.scrollTop = el.scrollHeight;
+  } catch (e) { if (!quiet) toast(`✗ ${e.message}`, 'error'); }
 }
 
 async function refreshOllama() {
@@ -232,7 +345,7 @@ async function loadModel(repoId, filePath) {
   try {
     const r = await fetch(`${API}/api/console/ollama/load`, {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: {'Content-Type': 'application/json', 'X-Console-Request': '1'},
       body: JSON.stringify({repo_id: repoId, file_path: filePath, model_name: modelName})
     });
     const d = await r.json();
@@ -252,7 +365,7 @@ async function removeModel(name) {
   if (!confirm(`Remove ${name} from Ollama? (Mirror blob is kept.)`)) return;
   toast(`Removing ${name}...`, 'loading');
   try {
-    const r = await fetch(`${API}/api/console/ollama/models/${name}`, {method: 'DELETE'});
+    const r = await fetch(`${API}/api/console/ollama/models/${name}`, {method: 'DELETE', headers: {'X-Console-Request': '1'}});
     if (r.ok) {
       toast(`✓ ${name} removed`, 'success');
       await refreshOllama();

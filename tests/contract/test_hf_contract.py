@@ -48,7 +48,7 @@ def client(mirror_root: Path):
     from server.main import create_app
     app = create_app(settings_override=settings_obj, repo_override=repo)
 
-    with TestClient(app) as c:
+    with TestClient(app, headers={"X-Console-Request": "1"}) as c:
         yield c
 
 
