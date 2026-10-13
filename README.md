@@ -57,6 +57,20 @@ docker compose up -d
 ./scripts/run-on-synology.sh
 ```
 
+## The model console on the rig "rome" (port 8002, since 2026-10-13)
+
+`llm-console.service` runs `console.main` from this checkout (`~/LLM_repo`, a git checkout of Gitea `ronald/LLM_repo`;
+deploy = push to it, then restart the service). It listens on 127.0.0.1 only: from the Mac,
+`ssh -L 8002:127.0.0.1:8002 rome` and open http://localhost:8002.
+
+- **Franken engine** (top of the page): which model serves Open WebUI on port 8081, VRAM per card, and Serve / Stop.
+  The console only queues one of four fixed actions through colibri's `tools/hot-expert/franken_service.sh`; a cron
+  job (every minute) runs it with colibri's `serve_alt.sh` outside this service's cgroup. A switch takes minutes.
+- **Ollama / mirror catalog:** downloads into the mirror, and "Load into Ollama" -- Ollama only; Open WebUI does not
+  use Ollama and the Franken engine cannot load these.
+- **Guard** (`console/guard.py`): Host allow-list, and changing requests need `X-Console-Request: 1` plus a same-origin
+  Origin (CSRF / DNS rebinding through the tunnel).
+
 ## Layout
 
 ```

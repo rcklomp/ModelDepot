@@ -170,7 +170,10 @@ async function refreshFranken() {
 function renderFranken(d) {
   const s = d.service || {};
   const job = d.running || d.queued;
-  frBusy = !!job || !!s.rig_lock;
+  // the running model's own keeper holds the rig lock (serve_alt-*) and a switch takes it over; any other holder is a
+  // benchmark / development job, and then nothing may start
+  const foreignLock = s.rig_lock && !s.rig_lock.startsWith('serve_alt');
+  frBusy = !!job || !!foreignLock;
   const m = frModels.find(x => x.action === s.serving);
   const now = m ? `${esc(m.name)} <span class="badge badge-loaded">serving</span>` : esc(SERVING_TEXT[s.serving] || s.serving || 'unknown');
   const vram = (s.vram_used_bytes || []).map((b, i) => b < 0 ? `card${i} ?` :
@@ -178,7 +181,7 @@ function renderFranken(d) {
   let line2 = [];
   if (s.model_ids && s.model_ids.length) line2.push(`Open WebUI sees: <b>${s.model_ids.map(esc).join(', ')}</b>`);
   line2.push(s.reserved ? 'service OFF (the watchdog leaves the port empty)' : `service ON (the watchdog restarts ${esc(s.service_engine)} if it dies)`);
-  if (s.rig_lock) line2.push(`rig busy: ${esc(s.rig_lock)}`);
+  if (foreignLock) line2.push(`<span style="color:var(--yellow)">rig busy with another job (${esc(s.rig_lock.split(' ')[0])}): switching is blocked until it ends</span>`);
   let jobHtml = '';
   if (job) {
     const when = d.running ? `running since ${esc(d.running.started_at)}` : 'queued, starts within a minute';
