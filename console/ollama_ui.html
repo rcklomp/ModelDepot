@@ -92,6 +92,22 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
+  /* the one model table */
+  .inv-note { font-size: 0.8rem; color: var(--text-dim); margin-bottom: 10px; }
+  .inv { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  .inv th { text-align: left; font-weight: 600; color: var(--text-dim); font-size: 0.72rem; text-transform: uppercase;
+            letter-spacing: 0.05em; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  .inv td { padding: 8px; border-bottom: 1px solid var(--surface2); vertical-align: top; }
+  .inv tr:hover td { background: var(--surface); }
+  .inv .num { text-align: right; white-space: nowrap; }
+  .inv .act { text-align: right; white-space: nowrap; }
+  .inv .badge { margin-left: 0; }
+  .dim { color: var(--text-dim); }
+  .chip { display: inline-flex; align-items: center; gap: 4px; background: #14532d; color: var(--green);
+          border-radius: 4px; padding: 1px 4px 1px 8px; font-family: monospace; font-size: 0.78rem; margin: 1px 0; }
+  .chip button { background: none; border: none; color: var(--green); cursor: pointer; font-size: 0.9rem; padding: 0 4px; }
+  .chip button:hover { color: var(--red); }
+
   /* Franken engine */
   .fr-status { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 12px; }
   .fr-now { font-size: 1.05rem; font-weight: 600; }
@@ -112,7 +128,7 @@
 <body>
 
 <h1>🧠 LLM Repo — Model Manager</h1>
-<p class="subtitle">Which model the Franken engine serves to Open WebUI, and the local model mirror.</p>
+<p class="subtitle">Which model the Franken engine serves to Open WebUI, and the other models on the rig.</p>
 
 <div class="section">
   <div class="section-title">Franken engine — serving Open WebUI (port 8081)</div>
@@ -122,26 +138,25 @@
 </div>
 
 <div class="section">
-  <div class="section-title">In Ollama now — Ollama only (Open WebUI does not use Ollama; the Franken engine cannot load these)</div>
-  <div id="ollama-list"><span class="spinner"></span></div>
-</div>
-
-<div class="section">
-  <div class="section-title">Mirror catalog — "Load into Ollama" registers a model with Ollama only</div>
-  <div id="catalog"><span class="spinner"></span></div>
+  <div class="section-title">Other models on the rig — the mirror and Ollama, each model once</div>
+  <div class="inv-note">Ollama is separate from the Franken engine above: Open WebUI does not show Ollama models (its Ollama
+    connection is off), so they are for the rig's command line (<code>ollama run &lt;name&gt;</code>). Ollama and a Franken
+    model share the three cards: running both at once can run out of VRAM.</div>
+  <table class="inv">
+    <thead><tr><th>Model</th><th>Quant</th><th class="num">Size</th><th>In the mirror</th><th>In Ollama</th><th></th></tr></thead>
+    <tbody id="inv-body"><tr><td colspan="6"><span class="spinner"></span></td></tr></tbody>
+  </table>
 </div>
 
 <div id="toast" style="display:none"></div>
 
 <script>
 const API = '';
-const loadedModels = new Set();
 
 async function init() {
   refreshFranken();
   setInterval(refreshFranken, 5000);
-  await refreshOllama();
-  await refreshCatalog();
+  refreshModels();
 }
 
 // ---- Franken engine -------------------------------------------------------------------------
@@ -237,150 +252,59 @@ async function showLog(id, quiet) {
   } catch (e) { if (!quiet) toast(`✗ ${e.message}`, 'error'); }
 }
 
-async function refreshOllama() {
+async function refreshModels() {
+  const body = document.getElementById('inv-body');
   try {
-    const r = await fetch(`${API}/api/console/ollama/models`);
+    const r = await fetch(`${API}/api/console/inventory`);
     const d = await r.json();
-    loadedModels.clear();
-    d.models.forEach(m => loadedModels.add(m.name));
-    const el = document.getElementById('ollama-list');
-    if (d.models.length === 0) {
-      el.innerHTML = '<div style="color:var(--text-dim);padding:8px">No models loaded yet.</div>';
-      return;
-    }
-    el.innerHTML = d.models.map(m => `
-      <div class="ollama-row">
-        <span class="ollama-name">🟢 ${m.name}</span>
-        <span class="ollama-size">${m.size}</span>
-        <button class="btn btn-remove" onclick="removeModel('${m.name}')">Remove</button>
-      </div>
-    `).join('');
-  } catch (e) {
-    document.getElementById('ollama-list').innerHTML = '<div style="color:var(--red)">Failed to load.</div>';
-  }
-}
-
-async function refreshCatalog() {
-  try {
-    const r = await fetch(`${API}/api/console/catalog`);
-    const items = await r.json();
-    const el = document.getElementById('catalog');
-    if (!items || items.length === 0) {
-      el.innerHTML = '<div style="color:var(--text-dim);padding:8px">Mirror is empty.</div>';
-      return;
-    }
-    // Fetch detail for each to get file list
-    const detailed = await Promise.all(items.map(async item => {
-      const dr = await fetch(`${API}/api/console/models/${item.repo_id}`);
-      return dr.ok ? await dr.json() : null;
-    }));
-
-    el.innerHTML = items.map((item, i) => {
-      const detail = detailed[i];
-      const type = item.type || 'unknown';
-      const loaded = loadedModels.has(slugify(item.repo_id));
-      const files = detail && detail.revisions && detail.revisions[0]
-        ? detail.revisions[0].files : [];
-      const ggufFiles = files.filter(f => f.path.endsWith('.gguf'));
-
-      // Detect shard groups: files matching -NNNNN-of-NNNNN belong together
-      const shardRe = /^(.+)-(\d{5})-of-(\d{5})\./;
-      const shardGroups = {};
-      const standalone = [];
-      for (const f of ggufFiles) {
-        const m = f.path.match(shardRe);
-        if (m) {
-          const key = m[1];
-          if (!shardGroups[key]) shardGroups[key] = [];
-          shardGroups[key].push(f);
-        } else {
-          standalone.push(f);
-        }
-      }
-      // Build load targets: each is {label, firstFile, count, totalSize}
-      const loadTargets = [];
-      for (const f of standalone) {
-        loadTargets.push({label: f.path.split('/').pop(), file: f.path,
-                          count: 1, size: f.size});
-      }
-      for (const [prefix, shards] of Object.entries(shardGroups)) {
-        shards.sort((a,b) => a.path.localeCompare(b.path));
-        loadTargets.push({
-          label: `${prefix.split('/').pop()} (${shards.length} shards)`,
-          file: shards[0].path,  // API detects siblings from the first shard
-          count: shards.length,
-          size: shards.reduce((s,f) => s + f.size, 0),
-        });
-      }
-
-      return `
-        <div class="model-card">
-          <div class="model-info">
-            <div class="model-name">
-              ${item.repo_id}
-              <span class="badge badge-${type}">${type}</span>
-              ${loaded ? '<span class="badge badge-loaded">in ollama</span>' : ''}
-            </div>
-            <div class="model-meta">${formatSize(item.total_size_bytes || 0)}</div>
-            ${loadTargets.length > 0 ? `
-              <div class="file-list">
-                ${loadTargets.map(t => `
-                  <div class="file-row">
-                    <span class="file-path">${t.label}</span>
-                    <span class="file-size">${formatSize(t.size)}</span>
-                    <button class="btn btn-load" onclick="loadModel('${item.repo_id}','${t.file}')">
-                      ${t.count > 1 ? `Load ${t.count} shards` : 'Load into Ollama'}
-                    </button>
-                  </div>
-                `).join('')}
-              </div>
-            ` : `<div class="model-meta" style="margin-top:4px">No GGUF files (safetensors — use vLLM or convert first)</div>`}
-          </div>
-        </div>
-      `;
+    if (!r.ok) throw new Error(d.detail || r.status);
+    const warn = d.ollama_error ? `<tr><td colspan="6" style="color:var(--yellow)">${esc(d.ollama_error)}</td></tr>` : '';
+    body.innerHTML = warn + d.rows.map(row => {
+      const inMirror = row.kind === 'mirror'
+        ? `<span class="badge badge-gguf" title="${esc(row.repo_id)}">${esc(row.repo_id.split('/')[0])}</span>` : '<span class="dim">—</span>';
+      const chips = row.ollama.map(n => `<span class="chip">${esc(n)}<button title="Remove ${esc(n)} from Ollama (the mirror file stays)"
+          onclick="removeFromOllama('${esc(n)}')">×</button></span>`).join(' ') || '<span class="dim">—</span>';
+      const action = row.can_add
+        ? `<button class="btn btn-load" onclick="addToOllama('${esc(row.repo_id)}','${esc(row.file)}','${esc(slugify(row.label.replace(/\.gguf$/i, '')))}')">${row.ollama.length ? 'Add another' : 'Add to Ollama'}</button>` : '';
+      const shards = row.shards > 1 ? ` <span class="dim">(${row.shards} files)</span>` : '';
+      return `<tr>
+        <td><div class="model-name">${esc(row.label)}${shards}</div>${row.note ? `<div class="model-meta">${esc(row.note)}</div>` : ''}</td>
+        <td>${esc(row.quant || '')}</td>
+        <td class="num">${formatSize(row.size || 0)}</td>
+        <td>${inMirror}</td>
+        <td>${chips}</td>
+        <td class="act">${action}</td>
+      </tr>`;
     }).join('');
   } catch (e) {
-    document.getElementById('catalog').innerHTML = '<div style="color:var(--red)">Failed to load catalog.</div>';
+    body.innerHTML = `<tr><td colspan="6" style="color:var(--red)">Could not load the model list: ${esc(e.message)}</td></tr>`;
   }
 }
 
-async function loadModel(repoId, filePath) {
-  const modelName = slugify(repoId);
-  toast(`Loading ${modelName} from mirror (zero copy)...`, 'loading');
+async function addToOllama(repoId, filePath, suggested) {
+  const name = prompt('Name for this model in Ollama:', suggested);
+  if (!name) return;
+  toast(`Adding ${name} to Ollama…`, 'loading');
   try {
     const r = await fetch(`${API}/api/console/ollama/load`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json', 'X-Console-Request': '1'},
-      body: JSON.stringify({repo_id: repoId, file_path: filePath, model_name: modelName})
-    });
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Console-Request': '1'},
+      body: JSON.stringify({repo_id: repoId, file_path: filePath, model_name: name})});
     const d = await r.json();
-    if (d.ok) {
-      toast(`✓ ${modelName} loaded into Ollama!`, 'success');
-      await refreshOllama();
-      await refreshCatalog();
-    } else {
-      toast(`✗ ${d.detail || 'Failed'}`, 'error');
-    }
-  } catch (e) {
-    toast(`✗ Error: ${e.message}`, 'error');
-  }
+    if (!r.ok || !d.ok) throw new Error(d.detail || 'failed');
+    toast(`✓ ${name} is in Ollama`, 'success');
+  } catch (e) { toast(`✗ ${e.message}`, 'error'); }
+  refreshModels();
 }
 
-async function removeModel(name) {
-  if (!confirm(`Remove ${name} from Ollama? (Mirror blob is kept.)`)) return;
-  toast(`Removing ${name}...`, 'loading');
+async function removeFromOllama(name) {
+  if (!confirm(`Remove ${name} from Ollama? The mirror file is kept.`)) return;
   try {
-    const r = await fetch(`${API}/api/console/ollama/models/${name}`, {method: 'DELETE', headers: {'X-Console-Request': '1'}});
-    if (r.ok) {
-      toast(`✓ ${name} removed`, 'success');
-      await refreshOllama();
-      await refreshCatalog();
-    } else {
-      toast('✗ Failed to remove', 'error');
-    }
-  } catch (e) {
-    toast(`✗ ${e.message}`, 'error');
-  }
+    const r = await fetch(`${API}/api/console/ollama/models/${encodeURIComponent(name)}`,
+                          {method: 'DELETE', headers: {'X-Console-Request': '1'}});
+    if (!r.ok) throw new Error((await r.json()).detail || r.status);
+    toast(`✓ ${name} removed from Ollama`, 'success');
+  } catch (e) { toast(`✗ ${e.message}`, 'error'); }
+  refreshModels();
 }
 
 function slugify(s) {

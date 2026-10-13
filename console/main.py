@@ -48,6 +48,12 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail=f"{repo_id} not found")
         return detail
 
+    # ---- one list: the mirror's models and Ollama's, each once ---------
+    @app.get("/api/console/inventory")
+    def inventory():
+        from . import inventory as _inventory
+        return _inventory.build(state.repo)
+
     # ---- search (upstream proxy) -------------------------------------
     @app.get("/api/console/search")
     async def search_models(
