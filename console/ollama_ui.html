@@ -180,7 +180,7 @@ function renderFranken(d) {
       `card${i}<span class="vram"><i style="width:${Math.min(100, b / 24e9 * 100).toFixed(0)}%"></i></span>${(b / 1e9).toFixed(1)} GB`).join(' &nbsp; ');
   let line2 = [];
   if (s.model_ids && s.model_ids.length) line2.push(`Open WebUI sees: <b>${s.model_ids.map(esc).join(', ')}</b>`);
-  line2.push(s.reserved ? 'service OFF (the watchdog leaves the port empty)' : `service ON (the watchdog restarts ${esc(s.service_engine)} if it dies)`);
+  line2.push(s.reserved ? 'service OFF (the watchdog leaves the port empty)' : `service ON (the watchdog restarts ${esc((frModels.find(x => x.action === s.service_engine) || {}).name || s.service_engine)} if it dies)`);
   if (foreignLock) line2.push(`<span style="color:var(--yellow)">rig busy with another job (${esc(s.rig_lock.split(' ')[0])}): switching is blocked until it ends</span>`);
   let jobHtml = '';
   if (job) {
