@@ -66,8 +66,10 @@ deploy = push to it, then restart the service). It listens on 127.0.0.1 only: fr
 - **Franken engine** (top of the page): which model serves Open WebUI on port 8081, VRAM per card, and Serve / Stop.
   The console only queues one of four fixed actions through colibri's `tools/hot-expert/franken_service.sh`; a cron
   job (every minute) runs it with colibri's `serve_alt.sh` outside this service's cgroup. A switch takes minutes.
-- **Ollama / mirror catalog:** downloads into the mirror, and "Load into Ollama" -- Ollama only; Open WebUI does not
-  use Ollama and the Franken engine cannot load these.
+- **Other models on the rig:** ONE table, each model once (`console/inventory.py`): a mirror GGUF with the Ollama
+  models made from it (linked by size: Ollama re-packs the file and adds a few hundred bytes), an Ollama-only model on
+  its own row, safetensors listed with why Ollama cannot use them; "Add to Ollama" and x (remove) in the same row.
+  Ollama only: Open WebUI does not use Ollama and the Franken engine cannot load these.
 - **Guard** (`console/guard.py`): Host allow-list, and changing requests need `X-Console-Request: 1` plus a same-origin
   Origin (CSRF / DNS rebinding through the tunnel).
 
