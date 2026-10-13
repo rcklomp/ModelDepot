@@ -1,6 +1,7 @@
 """The one model list (console/inventory.py): each model once, Ollama linked to its mirror file by size."""
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from console import inventory
@@ -64,3 +65,37 @@ def test_gguf_targets_groups_shards_and_drops_mmproj():
     assert t["m-UD-IQ2_M"]["size"] == 15 and t["m-UD-IQ2_M"]["complete"] and t["m-UD-IQ2_M"]["quant"] == "UD-IQ2_M"
     assert not t["big-Q4_K_M"]["complete"]
     assert t["other-Q6_K_P.gguf"]["quant"] == "Q6_K_P"
+
+
+# ---- the Ollama actions the table's buttons call -------------------------------------------------------------
+def test_the_ollama_routes_exist(populated_console):
+    app, _ = populated_console
+    spec = app.openapi()["paths"]          # app.routes nests included routers in newer FastAPI
+    paths = {(m.upper(), p) for p, ops in spec.items() for m in ops}
+    assert ("POST", "/api/console/ollama/load") in paths          # removed by mistake once (2026-10-13)
+    assert ("DELETE", "/api/console/ollama/models/{model_name}") in paths
+    assert ("GET", "/api/console/inventory") in paths
+
+
+def test_add_to_ollama_runs_ollama_create_on_the_mirror_blob(populated_console, monkeypatch):
+    import subprocess
+    app, _ = populated_console
+    seen = []
+    def fake_run(argv, **kw):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    monkeypatch.setattr("console.ollama_api.subprocess.run", fake_run)
+    with TestClient(app, headers=H) as c:
+        r = c.post("/api/console/ollama/load", json={"repo_id": "org/gguf-model", "file_path": "model.Q8_0.gguf",
+                                                     "model_name": "model-q8"})
+    assert r.status_code == 200 and r.json()["ok"]
+    assert seen and seen[0][:3] == ["ollama", "create", "model-q8"]
+
+
+def test_a_name_that_looks_like_an_option_is_refused(populated_console, monkeypatch):
+    app, _ = populated_console
+    monkeypatch.setattr("console.ollama_api.subprocess.run", lambda *a, **k: pytest.fail("ran ollama"))
+    with TestClient(app, headers=H) as c:
+        assert c.post("/api/console/ollama/load", json={"repo_id": "org/gguf-model", "file_path": "model.Q8_0.gguf",
+                                                        "model_name": "--help"}).status_code == 422
+        assert c.delete("/api/console/ollama/models/-rf").status_code == 400
