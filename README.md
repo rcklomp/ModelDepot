@@ -60,7 +60,7 @@ docker compose up -d
 ## The model console on the rig "rome" (port 8002, since 2026-10-13)
 
 `llm-console.service` runs `console.main` from this checkout (`~/LLM_repo`, a git checkout of Gitea `ronald/LLM_repo`;
-deploy = push to it, then restart the service). It listens on 127.0.0.1 only: from the Mac,
+deploy = push to it, fast-forward the rig's checkout, then restart the service: the exact commands are in CLAUDE.md). It listens on 127.0.0.1 only: from the Mac,
 `ssh -L 8002:127.0.0.1:8002 rome` and open http://localhost:8002.
 
 - **Franken engine** (top of the page): which model serves Open WebUI on port 8081, VRAM per card, and Serve / Stop.
