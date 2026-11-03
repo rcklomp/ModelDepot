@@ -84,8 +84,13 @@ def fetch(repo_id: str, staging_dir: Path, *, revision: str = "main",
     from huggingface_hub.errors import (
         BadRequestError, EntryNotFoundError, GatedRepoError,
         HfHubHTTPError, LocalEntryNotFoundError, RepositoryNotFoundError,
-        RevisionNotFoundError, RevisionResolutionError,
+        RevisionNotFoundError,
     )
+    try:
+        from huggingface_hub.errors import RevisionResolutionError
+    except ImportError:  # older huggingface_hub releases lack this class
+        class RevisionResolutionError(Exception):  # type: ignore[no-redef]
+            pass
 
     api = HfApi(endpoint=endpoint)
 
