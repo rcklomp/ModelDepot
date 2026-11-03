@@ -96,14 +96,21 @@ def fetch(repo_id: str, staging_dir: Path, *, revision: str = "main",
 
     # 1. Pin the revision to a concrete commit hash.
     try:
-        resolved = api.resolve_revision(repo_id, revision=revision, token=token)
+        if hasattr(api, "resolve_revision"):
+            resolved = api.resolve_revision(repo_id, revision=revision, token=token)
+            commit = str(getattr(resolved, "resolved", None)
+                         or getattr(resolved, "commit_sha", None) or resolved)
+        else:  # older huggingface_hub (< 0.35) has no resolve_revision
+            info = api.model_info(repo_id, revision=revision, token=token)
+            commit = str(getattr(info, "sha", "") or "")
+            if not commit:
+                raise HfSourceError(f"no commit for {repo_id}@{revision}")
     except RevisionResolutionError as exc:
         raise HfSourceError(f"could not resolve revision {revision!r}: {exc}") from exc
     except (GatedRepoError, RepositoryNotFoundError) as exc:
         raise _unavailable(repo_id, exc) from exc
     except (HfHubHTTPError, BadRequestError) as exc:
         raise HfSourceError(f"error resolving {repo_id}: {exc}") from exc
-    commit = str(resolved.resolved)
 
     # 2. Download into staging (flat files, no symlinks), with retry+resume.
     ignore = list(_DEFAULT_IGNORE)
@@ -113,7 +120,7 @@ def fetch(repo_id: str, staging_dir: Path, *, revision: str = "main",
     _download_with_resume(
         snapshot_download,
         repo_id=repo_id,
-        revision=resolved,
+        revision=commit,
         staging_dir=staging_dir,
         token=token,
         allow_patterns=allow_patterns,
@@ -126,7 +133,7 @@ def fetch(repo_id: str, staging_dir: Path, *, revision: str = "main",
     # 3. Capture per-file provenance from the repo tree at the resolved commit.
     try:
         tree_files = list(
-            api.list_repo_tree(repo_id, recursive=True, revision=resolved,
+            api.list_repo_tree(repo_id, recursive=True, revision=commit,
                                token=token)
         )
     except HfHubHTTPError as exc:
