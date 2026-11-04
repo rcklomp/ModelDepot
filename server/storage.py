@@ -121,6 +121,8 @@ class FilesystemStorage:
                     if not name_path.is_dir():
                         continue
                     # Only yield if it looks like a repo (has revisions/ or refs.json).
+                    if name_path.name.endswith(".deleting"):          # a delete that was interrupted: invisible, not a repo
+                        continue
                     if (name_path / "revisions").is_dir() or (name_path / "refs.json").is_file():
                         yield f"{prefix}{org_path.name}/{name_path.name}"
 

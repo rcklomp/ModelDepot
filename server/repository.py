@@ -249,6 +249,51 @@ class RepositoryCore:
                     refs_map.setdefault(digest, []).append((repo_id, commit, f.path))
         return refs_map
 
+    def repo_blob_usage(self, repo_id: str) -> dict:
+        """What deleting this repo would free: bytes only this repo holds (exclusive) and bytes other repos also use (shared)."""
+        mine: dict[HEX, int] = {}
+        for commit in self.list_revisions(repo_id):
+            for f in manifests.read(self._storage.manifest_path(repo_id, commit)).files:
+                mine[f.blob.split(":", 1)[1]] = f.size
+        others: set[HEX] = set()
+        for other in self.list_repos():
+            if other == repo_id:
+                continue
+            for commit in self.list_revisions(other):
+                for f in manifests.read(self._storage.manifest_path(other, commit)).files:
+                    others.add(f.blob.split(":", 1)[1])
+        exclusive = {d: n for d, n in mine.items() if d not in others}
+        return {"exclusive_bytes": sum(exclusive.values()), "shared_bytes": sum(n for d, n in mine.items() if d in others),
+                "exclusive_digests": sorted(exclusive)}
+
+    def delete_repository(self, repo_id: str) -> dict:
+        """Remove a repository (every revision and ref) and free the blobs no other repo uses.
+
+        Takes the store lock exclusively and does not wait: while an ingest runs it raises StoreBusy (the ingest's blobs
+        must not be judged unreferenced). The repo directory is renamed away first, so a crash leaves either the whole repo
+        or none of it visible; the blobs go last (an interrupted delete leaves orphans, which GC collects).
+        """
+        import shutil
+        with self.gc_lock():
+            repo_dir = self._storage.repo_dir(repo_id)
+            if not repo_dir.is_dir():
+                raise RepositoryNotFound(repo_id)
+            usage = self.repo_blob_usage(repo_id)
+            trash = repo_dir.with_name(repo_dir.name + ".deleting")
+            repo_dir.rename(trash)
+            shutil.rmtree(trash, ignore_errors=True)
+            freed = deleted = 0
+            for digest in usage["exclusive_digests"]:
+                size = 0
+                path = self._storage.blobs.path_for(digest)
+                if path.is_file():
+                    size = path.stat().st_size
+                if self.delete_blob(digest):
+                    freed += size
+                    deleted += 1
+            self._events.emit(events.REPOSITORY_DELETED, repo_id=repo_id, blobs=deleted, bytes=freed)
+            return {"blobs_deleted": deleted, "freed_bytes": freed, "shared_bytes_kept": usage["shared_bytes"]}
+
     def delete_blob(self, digest: HEX) -> bool:
         """Remove an unreferenced blob. Emits GCDeletedBlob. Returns True if removed."""
         path = self._storage.blobs.path_for(digest)

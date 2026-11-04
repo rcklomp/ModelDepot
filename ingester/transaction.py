@@ -80,7 +80,8 @@ def ingest(repo: RepositoryCore, snapshot: StagedSnapshot, *,
            source_kind: str = "huggingface", source_ref: str | None = None,
            ref_name: str = "main", license_name: str | None = None,
            update_ref: bool = True,
-           allow_incomplete_shards: bool = False) -> IngestResult:
+           allow_incomplete_shards: bool = False,
+           progress=None) -> IngestResult:
     """Publish a staged snapshot as a new immutable revision.
 
     Steps (each emits an event):
@@ -104,12 +105,12 @@ def ingest(repo: RepositoryCore, snapshot: StagedSnapshot, *,
     with repo.ingest_lock():
         return _ingest_locked(repo, snapshot, source_kind=source_kind, source_ref=source_ref, ref_name=ref_name,
                               license_name=license_name, update_ref=update_ref,
-                              allow_incomplete_shards=allow_incomplete_shards)
+                              allow_incomplete_shards=allow_incomplete_shards, progress=progress)
 
 
 def _ingest_locked(repo: RepositoryCore, snapshot: StagedSnapshot, *, source_kind: str, source_ref: str | None,
                    ref_name: str, license_name: str | None, update_ref: bool,
-                   allow_incomplete_shards: bool) -> IngestResult:
+                   allow_incomplete_shards: bool, progress=None) -> IngestResult:
     repo_id = snapshot.repo_id
     commit = snapshot.commit
     repo.repository_created(repo_id)
@@ -119,9 +120,11 @@ def _ingest_locked(repo: RepositoryCore, snapshot: StagedSnapshot, *, source_kin
         _check_shard_completeness(snapshot.files)
 
     file_entries: list[FileEntry] = []
-    for staged in snapshot.files:
+    for i, staged in enumerate(snapshot.files, 1):
         blob_ref, digest = _store_one(repo, staged)
         file_entries.append(_to_file_entry(staged, blob_ref, digest, commit))
+        if progress:
+            progress(i, len(snapshot.files), staged.path)
 
     manifest = Manifest(
         schema_version=SCHEMA_VERSION,

@@ -107,8 +107,9 @@ class HfAdapter(ProtocolAdapter):
     Both also take the legacy single-segment names ('gpt2', 'squad'). Spaces are not served.
     """
 
-    def __init__(self, repo: RepositoryCore):
+    def __init__(self, repo: RepositoryCore, wanted=None):
         self._repo = repo
+        self._wanted = wanted        # server.hub.state.WantedLog: what clients asked for and we did not have
 
     @property
     def name(self) -> str:
@@ -187,6 +188,8 @@ class HfAdapter(ProtocolAdapter):
         try:
             commit = self._repo.resolve_ref(repo_id, revision_param)
         except RepositoryNotFound:
+            if self._wanted is not None:
+                self._wanted.note(kind, public, request.headers.get("user-agent", ""))
             raise HTTPException(status_code=404, detail=f"{kind} {public} not found")
         except RevisionNotFound:
             raise HTTPException(status_code=404, detail=f"revision {revision_param!r} not found")
