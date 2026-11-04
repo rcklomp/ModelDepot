@@ -1,8 +1,31 @@
 # LLM_repo -- rules for a session started in this repository
 
-This repository is the owner's LLM stack on the rig (an artifact repository with a Hugging Face adapter, and the model console on :8002 that serves, switches and stops the Franken models). State, the order of work, the rig rules and the closeout live in the Colibri repo (`~/Projects/colibri`), not here. Read, in the order of HARD-RULES.md R15 (every `tools/hot-expert/...` path below is relative to `~/Projects/colibri`):
+**What this is.** A self-hosted, Hugging Face-compatible repository for AI models and datasets (no Spaces), run in a Docker container on the owner's
+Synology DS713+ (Intel Atom D2700, 4 GB RAM, an old kernel, Docker installed), with a browser GUI. Machines on the LAN set `HF_ENDPOINT` to it and
+`huggingface_hub`, `transformers`, `hf download`, vLLM, mlx_lm, llama.cpp and Ollama fetch from it as if it were huggingface.co. Why: models and
+datasets stay available when the Hub is blocked, rate-limited or gone, and are downloaded once per LAN instead of once per machine.
 
-1. `~/Projects/colibri/tools/hot-expert/HARD-RULES.md` (the rules every session obeys; hooks enforce most of them) and the SESSION CARD the SessionStart hook printed. If there was no card, the hooks are not registered: read the file yourself.
-2. `bash ~/Projects/colibri/tools/hot-expert/doc_currency.sh`, `~/Projects/colibri/CLAUDE.md` (the rig's traps), `tools/hot-expert/HANDOFF-2026-10-06b.md` (state; the model console and its deploy recipe are in its section 3), `tools/hot-expert/ACTION-LIST.md`, then the plan the next item's row names; the owner's feedback notes are in `~/.claude/projects/-Users-ronald-Projects/memory/` (their rules are in HARD-RULES.md).
+**What it is NOT (owner, 2026-11-04).** It is not part of the Franken-Engine, Colibri or rig projects, and none of their rules, session card or closeout apply
+here. The AI rig is just one client of it, like any other machine. Do not add rig, Franken or Ollama-management code to this repository; the rig's own model
+console moved to colibri (`tools/hot-expert/rig_console/`, frozen copy of this repository's old `console/` at the tag `archive/rig-console`). The name "LLM_repo"
+is the Gitea repository's name and the working name of the app; the owner is choosing a better name (a rename must stay a one-place change).
 
-Facts about THIS repository: Gitea `ronald/LLM_repo`; push as `claude-bot` only (credential-store helper, never read or print the file); the rig copy is `~/LLM_repo`; a code change in `console/` is deployed by a side ref plus a fast-forward on the rig and a restart of `llm-console` (handoff section 3); the console only QUEUES one of four words through `tools/hot-expert/franken_service.sh` in colibri, so never start `serve_alt.sh` by hand over a running service. Times in reports are Amsterdam time; never hand the owner a to-do list; after a task run the task-closeout skill (`bash ~/Projects/colibri/tools/hot-expert/closeout_check.sh --full`: it checks this repo too).
+**Layout.** `server/` the HTTP app and repository core (content-addressed blobs, immutable manifests, mutable refs; plain files, rsync-portable),
+`server/adapters/hf_adapter.py` the Hugging Face routes, `ingester/` downloads and imports (HF, Civitai, local), `scripts/`, `docs/`, `tests/`.
+`docs/DESIGN.md` is the rationale; the principles in the README (storage is the truth, blobs immutable, derived state rebuildable) are not negotiable.
+
+**Rules for a session here.**
+- Done = the tests are green AND, for anything a client sees, a probe with the REAL `huggingface_hub` client against a running instance (the unit tests
+  once passed while `snapshot_download` was broken). Say what was run and what was not; "not run" is never green.
+- The target is small: one uvicorn worker, no C extensions, no Node build step, nothing that needs more than a few hundred MB. Keep dependencies few.
+- Never delete or rewrite the owner's store (`MIRROR_ROOT`); anything that removes blobs must be safe against a download in progress.
+- Credentials: never read, print, copy or write `~/.config/git/gitea-*credentials`, tokens or ssh keys. Push as `claude-bot` only (credential-store helper), to Gitea
+  `ronald/LLM_repo`, branch `main`. Another agent (the owner's Hermes Agent on the NAS, commits as `hermes-agent`) also pushes here: `git pull --ff-only` first,
+  never force-push, never rebase published commits.
+- Deploying to the NAS is not something a session can do (no ssh entry for it): a change lands on Gitea `main`; the NAS pulls it and rebuilds the image
+  (`docs/DEPLOYMENT.md`). Say that plainly instead of claiming a deploy.
+- Small commits, one change each; code first, its doc in the same commit. Commit messages end with the attribution lines from the session's system reminder.
+
+**How the owner likes answers.** Plain words, short: what changed, what it means, whether it is safe, then the next item. Few numbers in the message (the detail
+goes in the commit). "Not measured" / "not verified" instead of a guess. Times in Amsterdam time. Never hand the owner a to-do list; if something is open and not
+his to decide, decide, take the safe default and name the assumption in one line.

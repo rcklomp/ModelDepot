@@ -16,8 +16,8 @@ rate-limited, or taken down, your machines keep working because they already
 pulled what they need and resolve against your mirror. Storage is plain files
 on storage you own (external SSD, NAS share) — portable via rsync.
 
-This is **not** a Hugging Face mirror. It is an artifact repository with an HF
-adapter. The storage layer has no knowledge of Hugging Face; HF is the first
+This is **not** only a Hugging Face mirror. It is an artifact repository with an HF
+adapter, for models and datasets. The storage layer has no knowledge of Hugging Face; HF is the first
 protocol adapter. Civitai, Ollama, OCI, and filesystem adapters follow without
 touching storage.
 
@@ -32,8 +32,11 @@ touching storage.
 
 ## Status
 
-Early. Milestone 1 (Repository Core) and Milestone 2 (HF compatibility) are the
-current focus. See the implementation plan and `docs/` for detail.
+A standalone application for a NAS (it has nothing to do with any inference engine or GPU rig; those are just clients).
+Today: the Hugging Face model routes, an ingester (`repo ingest-hf`, `ingest-civitai`, `ingest-local`) and integrity / GC jobs, all from the command line.
+Being built, in this order: correctness fixes against the current `huggingface_hub`, datasets, a browser GUI served by the same process, one Docker image
+for the Synology DS713+, then uploading your own models and datasets. The old rig console that used to live here is `tools/hot-expert/rig_console/` in
+the colibri repository (the tag `archive/rig-console` keeps the last version of this repository that carried it).
 
 ## Quick start (dev)
 
@@ -56,22 +59,6 @@ docker compose up -d
 ```bash
 ./scripts/run-on-synology.sh
 ```
-
-## The model console on the rig "rome" (port 8002, since 2026-10-13)
-
-`llm-console.service` runs `console.main` from this checkout (`~/LLM_repo`, a git checkout of Gitea `ronald/LLM_repo`;
-deploy = push to it, fast-forward the rig's checkout, then restart the service: the exact commands are in colibri `tools/hot-expert/HANDOFF-2026-10-06b.md` section 3 (model-console bullet, 'Deploy of a console code change'); on the owner's Mac the LaunchAgent `com.ronald.rome-tunnel` already holds the ssh tunnel). It listens on 127.0.0.1 only: from the Mac,
-`ssh -L 8002:127.0.0.1:8002 rome` and open http://localhost:8002.
-
-- **Franken engine** (top of the page): which model serves Open WebUI on port 8081, VRAM per card, and Serve / Stop.
-  The console only queues one of four fixed actions through colibri's `tools/hot-expert/franken_service.sh`; a cron
-  job (every minute) runs it with colibri's `serve_alt.sh` outside this service's cgroup. A switch takes minutes.
-- **Other models on the rig:** ONE table, each model once (`console/inventory.py`): a mirror GGUF with the Ollama
-  models made from it (linked by size: Ollama re-packs the file and adds a few hundred bytes), an Ollama-only model on
-  its own row, safetensors listed with why Ollama cannot use them; "Add to Ollama" and x (remove) in the same row.
-  Ollama only: Open WebUI does not use Ollama and the Franken engine cannot load these.
-- **Guard** (`console/guard.py`): Host allow-list, and changing requests need `X-Console-Request: 1` plus a same-origin
-  Origin (CSRF / DNS rebinding through the tunnel).
 
 ## Layout
 
