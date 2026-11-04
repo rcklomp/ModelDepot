@@ -13,6 +13,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from .. import __version__
 from ..locks import StoreBusy
 from ..repository import RepositoryNotFound
 from ..storage import core_repo_id
@@ -95,7 +96,7 @@ def create_router(ctx) -> APIRouter:
                 "models": sum(1 for r in repos if not r.startswith("datasets/")), "datasets": sum(1 for r in repos if r.startswith("datasets/")),
                 "queue": ctx.jobs.active_summary(), "hf_token_set": bool(ctx.hub_settings.get("hf_token")),
                 "read_token_required": bool(read), "namespace": ctx.settings.namespace, "read_only": ctx.settings.read_only,
-                "version": "0.2.0"}
+                "version": __version__}
 
     # ---- library -------------------------------------------------------
     @router.get("/library", dependencies=R)

@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import events
+from . import __version__, events
 from .adapters.hf_adapter import HfAdapter
 from .adapters.hf_upload import HfUploadAdapter
 from .auth import ReadTokenGate
@@ -80,7 +80,7 @@ def create_app(settings_override: "Settings | None" = None,
         yield
         ctx.jobs.stop()
 
-    app = FastAPI(title="ModelDepot", version="0.2.0", docs_url="/docs", lifespan=lifespan)
+    app = FastAPI(title="ModelDepot", version=__version__, docs_url="/docs", lifespan=lifespan)
     app.state.hub = ctx
     app.state.index = open_index(active_settings.index_backend, active_settings.index_dir)
     app.state.repository = repo
