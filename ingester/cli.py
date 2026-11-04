@@ -23,7 +23,7 @@ from pathlib import Path
 from server import events
 from server.config import Settings, load_settings
 from server.repository import RepositoryCore
-from server.storage import FilesystemStorage
+from server.storage import FilesystemStorage, core_repo_id
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,6 +46,8 @@ def _build_parser() -> argparse.ArgumentParser:
     # ---- ingest hf ----
     hf = sub.add_parser("ingest-hf", help="ingest a Hugging Face repo")
     hf.add_argument("repo_id", help="e.g. 'tinyllama/TinyLlama-1.1B-Chat-v1.0'")
+    hf.add_argument("--type", dest="repo_type", choices=["model", "dataset"], default="model",
+                    help="what the repository is (default: model). A dataset is stored as 'datasets/<org>/<name>'")
     hf.add_argument("--rev", default="main", help="revision (branch/tag/commit)")
     hf.add_argument("--token", default=os.environ.get("HF_TOKEN", ""),
                     help="HF token (default: $HF_TOKEN)")
@@ -125,6 +127,8 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="ingest a local directory of model files (GGUF, safetensors, etc.)")
     lc.add_argument("repo_id",
                     help="repository id to publish as (e.g. 'Huihui/Qwen3.6-35B-GGUF')")
+    lc.add_argument("--type", dest="repo_type", choices=["model", "dataset"], default="model",
+                    help="what the repository is (default: model)")
     lc.add_argument("path", help="local directory containing the model files")
     lc.add_argument("--ref", default="main",
                     help="local reference name to point at the new commit")
@@ -158,20 +162,20 @@ def _cmd_ingest_hf(args) -> int:
     # on re-run (HF's resume cache lives under staging/.cache/huggingface/ and
     # must be at the same path to be reused). A lockfile prevents two concurrent
     # ingests of the same repo from corrupting each other.
-    staging = storage.staging_dir / f"hf-{_slug(args.repo_id)}"
+    staging = storage.staging_dir / f"hf-{_slug(core_repo_id(args.repo_type, args.repo_id))}"
     staging.mkdir(parents=True, exist_ok=True)
 
     token = args.token or None
     endpoint = args.endpoint or None
     # Default progress log: <store>/log/ingest-<repo>.log (tail-able).
     progress_log = Path(args.progress_log) if args.progress_log else (
-        settings.log_dir / f"ingest-{_slug(args.repo_id)}.log")
+        settings.log_dir / f"ingest-{_slug(core_repo_id(args.repo_type, args.repo_id))}.log")
     try:
         print(f"resolving and downloading {args.repo_id} @ {args.rev} ...")
         print(f"  (retries={args.retries}; resume-on-interrupt enabled; "
               f"log: {progress_log})")
         snapshot = hf_source.fetch(
-            args.repo_id, staging, revision=args.rev, token=token,
+            args.repo_id, staging, revision=args.rev, token=token, repo_type=args.repo_type,
             allow_patterns=args.allow, ignore_patterns=args.ignore,
             endpoint=endpoint, max_retries=args.retries,
             progress_log=progress_log,
@@ -264,7 +268,7 @@ def _cmd_ingest_local(args) -> int:
     total_size = sum(f.stat().st_size for _, f in all_files)
     print(f"ingesting {len(all_files)} file(s) ({total_size / 1e9:.2f} GB) "
           f"from {src}")
-    print(f"  repo_id: {args.repo_id}")
+    print(f"  repo_id: {core_repo_id(args.repo_type, args.repo_id)}")
     for rel, f in all_files:
         print(f"    {f.stat().st_size / 1e6:8.1f} MB  {rel}")
 
@@ -288,7 +292,7 @@ def _cmd_ingest_local(args) -> int:
         ))
 
     snapshot = StagedSnapshot(
-        repo_id=args.repo_id,
+        repo_id=core_repo_id(args.repo_type, args.repo_id),
         revision_requested="local",
         commit=commit,
         staging_dir=src,
@@ -308,7 +312,7 @@ def _cmd_ingest_local(args) -> int:
           f"revision {result.commit} ({result.file_count} files)")
     if result.ref_updated:
         print(f"  {args.ref} -> {result.commit}")
-    print(f"  serve at: /{args.repo_id}/resolve/{args.ref}/<file>")
+    print(f"  serve at: {'/datasets' if args.repo_type == 'dataset' else ''}/{args.repo_id}/resolve/{args.ref}/<file>")
     print("done.")
     return 0
 

@@ -89,7 +89,14 @@ class FilesystemStorage:
     def ensure_layout(self) -> None:
         self._settings.ensure_dirs()
 
+    @property
+    def datasets_dir(self) -> Path:
+        return self._settings.datasets_dir
+
     def repo_dir(self, repo_id: str) -> Path:
+        if repo_id.startswith(DATASET_PREFIX):
+            org, name = _split_repo_id(repo_id[len(DATASET_PREFIX):])
+            return self.datasets_dir / org / name
         org, name = _split_repo_id(repo_id)
         return self.repos_dir / org / name
 
@@ -103,17 +110,43 @@ class FilesystemStorage:
         return self.repo_dir(repo_id) / "refs.json"
 
     def iter_repos(self) -> Iterator[str]:
-        if not self.repos_dir.is_dir():
-            return
-        for org_path in sorted(self.repos_dir.iterdir()):
-            if not org_path.is_dir():
+        """Every repository, models first ('org/name') then datasets ('datasets/org/name')."""
+        for base, prefix in ((self.repos_dir, ""), (self.datasets_dir, DATASET_PREFIX)):
+            if not base.is_dir():
                 continue
-            for name_path in sorted(org_path.iterdir()):
-                if not name_path.is_dir():
+            for org_path in sorted(base.iterdir()):
+                if not org_path.is_dir():
                     continue
-                # Only yield if it looks like a repo (has revisions/ or refs.json).
-                if (name_path / "revisions").is_dir() or (name_path / "refs.json").is_file():
-                    yield f"{org_path.name}/{name_path.name}"
+                for name_path in sorted(org_path.iterdir()):
+                    if not name_path.is_dir():
+                        continue
+                    # Only yield if it looks like a repo (has revisions/ or refs.json).
+                    if (name_path / "revisions").is_dir() or (name_path / "refs.json").is_file():
+                        yield f"{prefix}{org_path.name}/{name_path.name}"
+
+
+DATASET_PREFIX = "datasets/"
+
+
+def repo_type_of(repo_id: str) -> str:
+    """'model' or 'dataset' for a core repo id (a dataset's id is 'datasets/<org>/<name>')."""
+    return "dataset" if repo_id.startswith(DATASET_PREFIX) else "model"
+
+
+def core_repo_id(repo_type: str, public_id: str) -> str:
+    """The id the core stores a repo under. Models: unchanged ('org/name', or 'name'). Datasets: 'datasets/org/name', with the
+    legacy single-segment names ('squad') under the org '_user' ('datasets/_user/squad'), so one repo has ONE id."""
+    if repo_type == "dataset":
+        return DATASET_PREFIX + (public_id if "/" in public_id else "_user/" + public_id)
+    return public_id
+
+
+def public_repo_id(core_id: str) -> str:
+    """What a client calls it: 'org/name' or the legacy 'squad'."""
+    if core_id.startswith(DATASET_PREFIX):
+        core_id = core_id[len(DATASET_PREFIX):]
+        return core_id[len("_user/"):] if core_id.startswith("_user/") else core_id
+    return core_id
 
 
 def _split_repo_id(repo_id: str) -> tuple[str, str]:

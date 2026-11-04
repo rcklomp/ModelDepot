@@ -21,6 +21,8 @@ import fnmatch
 from dataclasses import dataclass
 from pathlib import Path
 
+from server.storage import core_repo_id
+
 # Import HF lazily inside functions so the rest of the ingester (and tests that
 # stub it) don't require huggingface_hub at import time.
 
@@ -59,6 +61,7 @@ class HfSourceError(Exception):
 
 
 def fetch(repo_id: str, staging_dir: Path, *, revision: str = "main",
+          repo_type: str = "model",
           token: str | None = None, allow_patterns: list[str] | None = None,
           ignore_patterns: list[str] | None = None,
           endpoint: str | None = None,
@@ -86,26 +89,15 @@ def fetch(repo_id: str, staging_dir: Path, *, revision: str = "main",
         HfHubHTTPError, LocalEntryNotFoundError, RepositoryNotFoundError,
         RevisionNotFoundError,
     )
-    try:
-        from huggingface_hub.errors import RevisionResolutionError
-    except ImportError:  # older huggingface_hub releases lack this class
-        class RevisionResolutionError(Exception):  # type: ignore[no-redef]
-            pass
-
     api = HfApi(endpoint=endpoint)
 
-    # 1. Pin the revision to a concrete commit hash.
+    # 1. Pin the revision to a concrete commit hash (repo_info works for models and datasets on every huggingface_hub version).
     try:
-        if hasattr(api, "resolve_revision"):
-            resolved = api.resolve_revision(repo_id, revision=revision, token=token)
-            commit = str(getattr(resolved, "resolved", None)
-                         or getattr(resolved, "commit_sha", None) or resolved)
-        else:  # older huggingface_hub (< 0.35) has no resolve_revision
-            info = api.model_info(repo_id, revision=revision, token=token)
-            commit = str(getattr(info, "sha", "") or "")
-            if not commit:
-                raise HfSourceError(f"no commit for {repo_id}@{revision}")
-    except RevisionResolutionError as exc:
+        info = api.repo_info(repo_id, revision=revision, repo_type=repo_type, token=token)
+        commit = str(getattr(info, "sha", "") or "")
+        if not commit:
+            raise HfSourceError(f"no commit for {repo_id}@{revision}")
+    except RevisionNotFoundError as exc:
         raise HfSourceError(f"could not resolve revision {revision!r}: {exc}") from exc
     except (GatedRepoError, RepositoryNotFoundError) as exc:
         raise _unavailable(repo_id, exc) from exc
@@ -120,6 +112,7 @@ def fetch(repo_id: str, staging_dir: Path, *, revision: str = "main",
     _download_with_resume(
         snapshot_download,
         repo_id=repo_id,
+        repo_type=repo_type,
         revision=commit,
         staging_dir=staging_dir,
         token=token,
@@ -134,7 +127,7 @@ def fetch(repo_id: str, staging_dir: Path, *, revision: str = "main",
     try:
         tree_files = list(
             api.list_repo_tree(repo_id, recursive=True, revision=commit,
-                               token=token)
+                               repo_type=repo_type, token=token)
         )
     except HfHubHTTPError as exc:
         raise HfSourceError(f"could not list files for {repo_id}: {exc}") from exc
@@ -168,7 +161,7 @@ def fetch(repo_id: str, staging_dir: Path, *, revision: str = "main",
         ))
 
     return StagedSnapshot(
-        repo_id=repo_id, revision_requested=revision, commit=commit,
+        repo_id=core_repo_id(repo_type, repo_id), revision_requested=revision, commit=commit,
         staging_dir=staging_dir, files=staged,
     )
 
@@ -243,7 +236,7 @@ def _log_progress(progress_log: Path | None, line: str) -> None:
         f.write(f"{ts} {line}\n")
 
 
-def _download_with_resume(snapshot_download_fn, *, repo_id, revision,
+def _download_with_resume(snapshot_download_fn, *, repo_id, repo_type="model", revision,
                           staging_dir, token, allow_patterns, ignore_patterns,
                           endpoint, max_retries: int,
                           progress_log: Path | None = None) -> None:
@@ -264,6 +257,7 @@ def _download_with_resume(snapshot_download_fn, *, repo_id, revision,
                           f"attempt={attempt} repo={repo_id} status=downloading")
             snapshot_download_fn(
                 repo_id,
+                repo_type=repo_type,
                 revision=revision,
                 local_dir=str(staging_dir),
                 token=token,

@@ -33,8 +33,8 @@ touching storage.
 ## Status
 
 A standalone application for a NAS (it has nothing to do with any inference engine or GPU rig; those are just clients).
-Today: the Hugging Face model routes, an ingester (`repo ingest-hf`, `ingest-civitai`, `ingest-local`) and integrity / GC jobs, all from the command line.
-Being built, in this order: correctness fixes against the current `huggingface_hub`, datasets, a browser GUI served by the same process, one Docker image
+Today: the Hugging Face routes for models and datasets (`hf download`, `snapshot_download`, `datasets.load_dataset` work against it), an ingester (`repo ingest-hf`, `ingest-civitai`, `ingest-local`) and integrity / GC jobs, all from the command line.
+Being built, in this order: a browser GUI served by the same process, one Docker image
 for the Synology DS713+, then uploading your own models and datasets. The old rig console that used to live here is `tools/hot-expert/rig_console/` in
 the colibri repository (the tag `archive/rig-console` keeps the last version of this repository that carried it).
 

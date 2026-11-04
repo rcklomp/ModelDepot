@@ -60,6 +60,16 @@ Filesystem: (planned)  resolve ✓  tree ✓  refs ✗  commits ✗  upload ✗ 
 OCI:        (future)   resolve ✓  tree ✓  refs ✓  commits ✓  upload ✓  search ✗
 ```
 
+## Datasets
+
+Everything above exists twice: `/api/datasets/{org}/{repo}/...` and `/datasets/{org}/{repo}/resolve/{rev}/{file}` serve dataset repositories, so
+`hf download ... --repo-type dataset`, `snapshot_download(repo_type="dataset")`, `HfFileSystem` and `datasets.load_dataset("org/name")` work
+(tested with the real clients in `tests/compat/test_datasets.py`). Legacy single-segment names (`squad`, `gpt2`) work for both types.
+Storage: datasets live in `<root>/datasets/<org>/<name>` (models stay in `<root>/repos/<org>/<name>`); inside the core a dataset's id is
+`datasets/<org>/<name>` (`datasets/_user/squad` for a single-segment name); `repo list` prints that form. A MODEL organisation called
+`datasets` cannot be served (the URL is a dataset); the Hub reserves the name too. Ingest: `repo ingest-hf <id> --type dataset`,
+`repo ingest-local <id> <dir> --type dataset`.
+
 ## Cache headers
 
 `resolve/<40-hex commit>/...` is `immutable` for a year; `resolve/main/...` (any branch or tag) is `no-cache`, because a ref moves when a new revision is published.
@@ -76,7 +86,7 @@ OCI:        (future)   resolve ✓  tree ✓  refs ✓  commits ✓  upload ✓ 
 
 - **Xet chunk protocol.** Avoided via `HF_HUB_DISABLE_XET=1`. If Xet ever
   becomes mandatory for public downloads, the adapter will need to grow.
-- **`/api/datasets/...`, `/api/spaces/...`.** Out of scope (models only).
+- **Spaces** (`/api/spaces/...`, `/spaces/...`). Never: a Space is an app, not a stored artifact.
 - **Write/upload endpoints** (`POST /api/models/...`, LFS upload). The mirror is
   read-only; ingest happens through the CLI on a trusted box.
 - **Search** (`/api/models?search=...`). Out of scope; use `repo list` locally.

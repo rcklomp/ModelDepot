@@ -126,8 +126,7 @@ def _ingest_locked(repo: RepositoryCore, snapshot: StagedSnapshot, *, source_kin
     manifest = Manifest(
         schema_version=SCHEMA_VERSION,
         repo_id=repo_id,
-        source=Source(kind=source_kind,
-                      ref=source_ref or f"https://huggingface.co/{repo_id}"),
+        source=Source(kind=source_kind, ref=source_ref or _upstream_url(repo_id)),
         revision=RevisionInfo(
             commit=commit,
             fetched_at=_utcnow_iso(),
@@ -157,6 +156,12 @@ def _ingest_locked(repo: RepositoryCore, snapshot: StagedSnapshot, *, source_kin
         repo_id=repo_id, commit=commit,
         file_count=len(file_entries), published=published, ref_updated=ref_updated,
     )
+
+
+def _upstream_url(core_id: str) -> str:
+    from server.storage import public_repo_id, repo_type_of
+    public = public_repo_id(core_id)
+    return "https://huggingface.co/" + ("datasets/" if repo_type_of(core_id) == "dataset" else "") + public
 
 
 def _store_one(repo: RepositoryCore, staged: StagedFile) -> tuple[str, str]:

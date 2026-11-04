@@ -1,8 +1,8 @@
 """Hugging Face Hub HTTP compatibility adapter.
 
 Mounts the subset of HF Hub HTTP routes that `huggingface_hub` (and engines
-built on it: vLLM, TGI, transformers, diffusers, MLX, Ollama's hf.co/... puller)
-require to resolve and download a model. Clients point at the mirror with:
+built on it: vLLM, TGI, transformers, diffusers, MLX, `datasets`, Ollama's hf.co/... puller)
+require to resolve and download a model or a dataset. Clients point at the mirror with:
 
     HF_ENDPOINT=https://mirror.lan
     HF_HUB_DISABLE_XET=1   # avoid the Xet chunk protocol
@@ -32,7 +32,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from ..config import settings
+from ..storage import core_repo_id, public_repo_id
 from ..repository import (
     FileNotFound,
     RepositoryCore,
@@ -99,7 +99,13 @@ def _hf_compat_etag(file_meta: Any) -> str:
 
 
 class HfAdapter(ProtocolAdapter):
-    """Hugging Face Hub HTTP compatibility adapter."""
+    """Hugging Face Hub HTTP compatibility adapter, for models AND datasets.
+
+    The same handlers serve both repo types; `kind` ('model' | 'dataset') only decides the URL shape and the core id:
+      models    /api/models/...        /{org}/{repo}/resolve/{rev}/{file}              core id 'org/name'
+      datasets  /api/datasets/...      /datasets/{org}/{repo}/resolve/{rev}/{file}     core id 'datasets/org/name'
+    Both also take the legacy single-segment names ('gpt2', 'squad'). Spaces are not served.
+    """
 
     def __init__(self, repo: RepositoryCore):
         self._repo = repo
@@ -119,105 +125,93 @@ class HfAdapter(ProtocolAdapter):
         from fastapi import APIRouter
 
         router = APIRouter()
-
-        # IMPORTANT: specific sub-resource routes are registered BEFORE the
-        # generic model_info catch-all, because FastAPI matches in registration
-        # order. The generic route uses explicit two-segment {org}/{repo} (not
-        # {repo_id:path}) so it cannot shadow /tree, /refs, /commits, /paths-info.
-
-        # ---- model metadata (specific shapes) --------------------------
-        # /api/models/{org}/{repo}  and  /api/models/{repo} (single segment)
-        @router.get("/api/models/{org}/{repo}")
-        async def model_info_two(org: str, repo: str, request: Request):
-            return await self._model_info(f"{org}/{repo}", request)
-
-        @router.get("/api/models/{repo}")
-        async def model_info_one(repo: str, request: Request):
-            return await self._model_info(repo, request)
-
-        # huggingface_hub's snapshot_download / model_info(revision=...) / `hf download` ask for
-        # /api/models/{repo}/revision/{rev}; without it the whole-repo download fails with a 404 (found 2026-11-04).
-        @router.get("/api/models/{org}/{repo}/revision/{rev}")
-        async def model_info_rev_two(org: str, repo: str, rev: str, request: Request):
-            return await self._model_info(f"{org}/{repo}", request, revision=rev)
-
-        @router.get("/api/models/{repo}/revision/{rev}")
-        async def model_info_rev_one(repo: str, rev: str, request: Request):
-            return await self._model_info(repo, request, revision=rev)
-
-        # ---- sub-resources (registered before any catch-all) -----------
-        @router.get("/api/models/{org}/{repo}/tree/{rev}")
-        @router.get("/api/models/{org}/{repo}/tree/{rev}/{file_path:path}")
-        async def tree(org: str, repo: str, rev: str, request: Request, file_path: str = ""):
-            return await self._tree(f"{org}/{repo}", rev, file_path, request)
-
-        @router.get("/api/models/{org}/{repo}/refs")
-        async def refs(org: str, repo: str):
-            return await self._refs(f"{org}/{repo}")
-
-        @router.get("/api/models/{org}/{repo}/commits/{rev}")
-        async def commits(org: str, repo: str, rev: str):
-            return await self._commits(f"{org}/{repo}", rev)
-
-        @router.post("/api/models/{org}/{repo}/paths-info/{rev}")
-        async def paths_info(org: str, repo: str, rev: str, request: Request):
-            body = await request.json()
-            return await self._paths_info(f"{org}/{repo}", rev, body)
-
-        # ---- blob resolve (the load-bearing route) ---------------------
-        # GET and HEAD both return the same headers; HEAD has no body.
-        # huggingface_hub issues HEAD first to read metadata, then GET.
-        async def _resolve_handler(org: str, repo: str, rev: str, filename: str,
-                                   request: Request):
-            return await self._resolve(f"{org}/{repo}", rev, filename, request)
-
-        @router.get("/{org}/{repo}/resolve/{rev}/{filename:path}")
-        async def resolve_get(org: str, repo: str, rev: str, filename: str,
-                              request: Request):
-            return await _resolve_handler(org, repo, rev, filename, request)
-
-        @router.head("/{org}/{repo}/resolve/{rev}/{filename:path}")
-        async def resolve_head(org: str, repo: str, rev: str, filename: str,
-                               request: Request):
-            return await _resolve_handler(org, repo, rev, filename, request)
-
+        # Datasets FIRST: '/datasets/acme/x/resolve/main/f' would otherwise also match the model resolve route with org='datasets'
+        # (so a MODEL organisation called "datasets" cannot be served; the Hub reserves that name too).
+        for kind in ("dataset", "model"):
+            self._register(router, kind)
         return router
+
+    def _register(self, router, kind: str) -> None:
+        api = "/api/datasets" if kind == "dataset" else "/api/models"
+        res = "/datasets" if kind == "dataset" else ""
+
+        def cid(request: Request) -> str:
+            pp = request.path_params
+            public = f"{pp['org']}/{pp['repo']}" if "org" in pp else pp["repo"]
+            return core_repo_id(kind, public)
+
+        # Routes with a literal suffix (revision / tree / refs / commits / paths-info) come BEFORE the bare '/api/x/{org}/{repo}'
+        # info route, which would otherwise swallow '/api/datasets/squad/refs' as org='squad', repo='refs'.
+        for seg in ("{org}/{repo}", "{repo}"):
+            async def revision(request: Request):
+                return await self._info(kind, cid(request), request, revision=request.path_params["rev"])
+
+            async def tree(request: Request):
+                return await self._tree(cid(request), request.path_params["rev"], request.path_params.get("file_path", ""), request)
+
+            async def refs(request: Request):
+                return await self._refs(cid(request))
+
+            async def commits(request: Request):
+                return await self._commits(cid(request), request.path_params["rev"])
+
+            async def paths_info(request: Request):
+                return await self._paths_info(cid(request), request.path_params["rev"], await request.json())
+
+            router.add_api_route(f"{api}/{seg}/revision/{{rev}}", revision, methods=["GET"])
+            router.add_api_route(f"{api}/{seg}/tree/{{rev}}", tree, methods=["GET"])
+            router.add_api_route(f"{api}/{seg}/tree/{{rev}}/{{file_path:path}}", tree, methods=["GET"])
+            router.add_api_route(f"{api}/{seg}/refs", refs, methods=["GET"])
+            router.add_api_route(f"{api}/{seg}/commits/{{rev}}", commits, methods=["GET"])
+            router.add_api_route(f"{api}/{seg}/paths-info/{{rev}}", paths_info, methods=["POST"])
+
+        async def info(request: Request):
+            return await self._info(kind, cid(request), request)
+
+        router.add_api_route(f"{api}/{{org}}/{{repo}}", info, methods=["GET"])
+        router.add_api_route(f"{api}/{{repo}}", info, methods=["GET"])
+
+        # The load-bearing route. huggingface_hub sends HEAD first (metadata), then GET.
+        async def resolve(request: Request):
+            pp = request.path_params
+            return await self._resolve(cid(request), pp["rev"], pp["filename"], request)
+
+        for seg in ("{org}/{repo}", "{repo}"):
+            router.add_api_route(f"{res}/{seg}/resolve/{{rev}}/{{filename:path}}", resolve, methods=["GET", "HEAD"])
 
     # ---- route handlers ------------------------------------------------
 
-    async def _model_info(self, repo_id: str, request: Request, revision: str | None = None) -> JSONResponse:
+    async def _info(self, kind: str, repo_id: str, request: Request, revision: str | None = None) -> JSONResponse:
         revision_param = revision or request.query_params.get("revision", "main")
+        public = public_repo_id(repo_id)
         try:
             commit = self._repo.resolve_ref(repo_id, revision_param)
         except RepositoryNotFound:
-            raise HTTPException(status_code=404, detail=f"model {repo_id} not found")
+            raise HTTPException(status_code=404, detail=f"{kind} {public} not found")
         except RevisionNotFound:
             raise HTTPException(status_code=404, detail=f"revision {revision_param!r} not found")
 
         try:
-            files = self._repo.list_files(repo_id, commit)
+            manifest = self._repo.get_manifest(repo_id, commit)
         except (RepositoryNotFound, RevisionNotFound) as exc:
             raise HTTPException(status_code=404, detail=str(exc))
-
-        siblings = [{"rfilename": f.path, "size": f.size} for f in files]
-        fetched_at = _hf_datetime(self._repo.get_manifest(repo_id, commit).revision.fetched_at)
+        when = _hf_datetime(manifest.revision.fetched_at)
         body = {
-            "id": repo_id,
-            "modelId": repo_id,
-            "author": repo_id.split("/", 1)[0] if "/" in repo_id else "",
+            "id": public,
+            "author": public.split("/", 1)[0] if "/" in public else "",
             "sha": commit,
-            "lastModified": fetched_at,
+            "lastModified": when,
             "private": False,
             "gated": False,
             "disabled": False,
             "tags": [],
             "downloads": 0,
             "likes": 0,
-            "siblings": siblings,
-            "spaces": [],
-            "createdAt": fetched_at,
-            "paperArxivId": None,
+            "siblings": [{"rfilename": f.path, "size": f.size} for f in manifest.files],
+            "createdAt": when,
         }
+        if kind == "model":
+            body.update({"modelId": public, "spaces": [], "paperArxivId": None})
         return JSONResponse(content=body)
 
     async def _tree(self, repo_id: str, rev: str, file_path: str, request: Request) -> JSONResponse:
@@ -228,7 +222,7 @@ class HfAdapter(ProtocolAdapter):
         try:
             files = self._repo.list_files(repo_id, rev)
         except RepositoryNotFound:
-            raise HTTPException(status_code=404, detail=f"model {repo_id} not found")
+            raise HTTPException(status_code=404, detail=f"repository {public_repo_id(repo_id)} not found")
         except RevisionNotFound:
             raise HTTPException(status_code=404, detail=f"revision {rev!r} not found")
 
@@ -317,7 +311,7 @@ class HfAdapter(ProtocolAdapter):
         try:
             resolved = self._repo.get_file(repo_id, rev, filename)
         except RepositoryNotFound:
-            raise HTTPException(status_code=404, detail=f"model {repo_id} not found")
+            raise HTTPException(status_code=404, detail=f"repository {public_repo_id(repo_id)} not found")
         except RevisionNotFound:
             raise HTTPException(status_code=404, detail=f"revision {rev!r} not found")
         except FileNotFound:

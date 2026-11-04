@@ -60,6 +60,12 @@ class Settings:
         return self.mirror_root / "repos"
 
     @property
+    def datasets_dir(self) -> Path:
+        """Dataset repositories. A separate top-level dir, not a sub-dir of repos/: the model layout (repos/<org>/<name>) is
+        unchanged, so existing stores keep working untouched and an org called "datasets" cannot collide."""
+        return self.mirror_root / "datasets"
+
+    @property
     def staging_dir(self) -> Path:
         return self.mirror_root / "staging"
 
@@ -106,6 +112,7 @@ class Settings:
         for d in (
             self.blobs_dir,
             self.repos_dir,
+            self.datasets_dir,
             self.staging_dir,
             self.index_dir,
             self.log_dir,
