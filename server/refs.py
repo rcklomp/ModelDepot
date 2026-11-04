@@ -33,13 +33,8 @@ def load(refs_path: Path) -> dict[str, str]:
 
 def save(refs_path: Path, refs: dict[str, str]) -> None:
     """Atomically write refs. Creates parent dirs."""
-    refs_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = refs_path.with_suffix(".json.tmp")
-    tmp.write_text(
-        json.dumps(refs, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    tmp.replace(refs_path)
+    from .fsutil import atomic_write_text
+    atomic_write_text(refs_path, json.dumps(refs, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
 
 
 def resolve(refs: dict[str, str], ref: str) -> str | None:

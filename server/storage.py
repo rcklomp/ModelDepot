@@ -67,6 +67,10 @@ class FilesystemStorage:
         return self._blobs
 
     @property
+    def root(self) -> Path:
+        return self._settings.mirror_root
+
+    @property
     def repos_dir(self) -> Path:
         return self._settings.repos_dir
 
@@ -123,9 +127,13 @@ def _split_repo_id(repo_id: str) -> tuple[str, str]:
     return org, name
 
 
+class InvalidRepoId(ValueError):
+    """A repo id (or segment) that could escape the store or is malformed: the HTTP layer answers 404, never 500."""
+
+
 def _validate_segment(segment: str) -> None:
     """Reject path traversal and odd characters in repo id segments."""
     if not segment or segment in (".", ".."):
-        raise ValueError(f"invalid repo id segment: {segment!r}")
+        raise InvalidRepoId(f"invalid repo id segment: {segment!r}")
     if "/" in segment or segment.startswith("."):
-        raise ValueError(f"invalid repo id segment: {segment!r}")
+        raise InvalidRepoId(f"invalid repo id segment: {segment!r}")

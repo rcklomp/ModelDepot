@@ -48,6 +48,9 @@ class Settings:
     # Index backend: "sqlite" (default) or "none".
     index_backend: str
 
+    # Token for the GUI's admin API (download, delete, GC). Empty: the server makes one and keeps it in <root>/admin-token.
+    admin_token: str = ""
+
     @property
     def blobs_dir(self) -> Path:
         return self.mirror_root / "blobs" / "sha256"
@@ -72,8 +75,34 @@ class Settings:
     def log_dir(self) -> Path:
         return self.mirror_root / "log"
 
+    @property
+    def store_id_path(self) -> Path:
+        return self.mirror_root / ".store-id"
+
     def ensure_dirs(self) -> None:
-        """Create the directory skeleton. Safe to call repeatedly."""
+        """Create the directory skeleton. Safe to call repeatedly.
+
+        The root itself is created only when its PARENT exists: a NAS volume that is not mounted must stop the server, not
+        make it quietly create the store on the small system disk. A new store gets an id (`.store-id`); the id is shown in
+        /healthz and the GUI, so an unexpectedly empty library is noticed at once.
+        """
+        import logging
+        import uuid
+
+        root = self.mirror_root
+        if not root.is_dir():
+            try:
+                root.mkdir(parents=False)
+            except FileNotFoundError:
+                raise StoreNotAvailable(
+                    f"MIRROR_ROOT {root}: its parent directory does not exist. Is the volume mounted? "
+                    "Refusing to create the store on another disk.") from None
+        had_content = any(p.name not in (".store-id", ".store.lock") for p in root.iterdir())
+        if not self.store_id_path.exists():
+            self.store_id_path.write_text(uuid.uuid4().hex + "\n")
+            if not had_content:
+                logging.getLogger("llm_repo").warning(
+                    "initialised a NEW EMPTY store at %s: if you expected existing models here, the volume is not mounted", root)
         for d in (
             self.blobs_dir,
             self.repos_dir,
@@ -82,6 +111,10 @@ class Settings:
             self.log_dir,
         ):
             d.mkdir(parents=True, exist_ok=True)
+
+
+class StoreNotAvailable(Exception):
+    """MIRROR_ROOT cannot be used (missing volume)."""
 
 
 def load_settings() -> Settings:
@@ -95,6 +128,7 @@ def load_settings() -> Settings:
         read_only=_env_bool("MIRROR_READ_ONLY", False),
         auth_token=_env("MIRROR_AUTH_TOKEN", ""),
         index_backend=_env("MIRROR_INDEX_BACKEND", "sqlite"),
+        admin_token=_env("MIRROR_ADMIN_TOKEN", ""),
     )
 
 

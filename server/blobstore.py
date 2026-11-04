@@ -100,7 +100,7 @@ class BlobStore:
 
     # ---- writes --------------------------------------------------------
 
-    def put_file(self, src: Path, expected_digest: HEX | None = None) -> StoredBlob:
+    def put_file(self, src: Path, expected_digest: HEX | None = None, *, verified: bool = False) -> StoredBlob:
         """Move a staged file into the store, content-addressed.
 
         The file is hashed first. If `expected_digest` is given and does not
@@ -110,7 +110,8 @@ class BlobStore:
         source is simply removed (dedup). The write is atomic: we stage into a
         temp path next to the destination, fsync, then rename.
         """
-        actual = sha256_file(src)
+        # verified=True: the caller has just hashed this very file (a 100 GB file is read once, not twice)
+        actual = expected_digest if (verified and expected_digest) else sha256_file(src)
         if expected_digest is not None and actual != expected_digest:
             raise IntegrityError(expected_digest, actual, str(src))
 
@@ -173,6 +174,13 @@ def _atomic_replace(src: Path, dest: Path, *, fsync: bool) -> None:
     filesystems (e.g. staging dir on a different mount). For the common case
     where they share a filesystem, os.replace is directly atomic.
     """
+    if fsync:
+        # flush the file's DATA before it gets its final name: a rename alone is durable, the bytes behind it are not
+        fd0 = os.open(str(src), os.O_RDONLY)
+        try:
+            os.fsync(fd0)
+        finally:
+            os.close(fd0)
     try:
         os.replace(src, dest)
     except OSError:

@@ -41,12 +41,21 @@ from ..repository import (
 )
 from .base import Capabilities, ProtocolAdapter
 
-# repo_id is 'org/name' or just 'name' (urlencoded, no slashes inside segments).
-_REPO_ID_RE = re.compile(r"^[\w.\-]+(?:/[\w.\-]+)?$")
+_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
-def _is_valid_repo_id(repo_id: str) -> bool:
-    return bool(_REPO_ID_RE.match(repo_id))
+def _hf_datetime(iso: str | None) -> str | None:
+    """Our ISO-8601 ('2026-11-04T10:00:00+00:00') -> the Hub's '2026-11-04T10:00:00.000Z': huggingface_hub parses ONLY that."""
+    if not iso:
+        return None
+    from datetime import datetime, timezone
+    try:
+        d = datetime.fromisoformat(iso)
+    except ValueError:
+        return None
+    if d.tzinfo is not None:
+        d = d.astimezone(timezone.utc)
+    return d.strftime("%Y-%m-%dT%H:%M:%S.") + f"{d.microsecond // 1000:03d}Z"
 
 
 def _parse_range(range_header: str, size: int) -> tuple[int, int]:
@@ -126,11 +135,21 @@ class HfAdapter(ProtocolAdapter):
         async def model_info_one(repo: str, request: Request):
             return await self._model_info(repo, request)
 
+        # huggingface_hub's snapshot_download / model_info(revision=...) / `hf download` ask for
+        # /api/models/{repo}/revision/{rev}; without it the whole-repo download fails with a 404 (found 2026-11-04).
+        @router.get("/api/models/{org}/{repo}/revision/{rev}")
+        async def model_info_rev_two(org: str, repo: str, rev: str, request: Request):
+            return await self._model_info(f"{org}/{repo}", request, revision=rev)
+
+        @router.get("/api/models/{repo}/revision/{rev}")
+        async def model_info_rev_one(repo: str, rev: str, request: Request):
+            return await self._model_info(repo, request, revision=rev)
+
         # ---- sub-resources (registered before any catch-all) -----------
         @router.get("/api/models/{org}/{repo}/tree/{rev}")
         @router.get("/api/models/{org}/{repo}/tree/{rev}/{file_path:path}")
-        async def tree(org: str, repo: str, rev: str, file_path: str = ""):
-            return await self._tree(f"{org}/{repo}", rev, file_path)
+        async def tree(org: str, repo: str, rev: str, request: Request, file_path: str = ""):
+            return await self._tree(f"{org}/{repo}", rev, file_path, request)
 
         @router.get("/api/models/{org}/{repo}/refs")
         async def refs(org: str, repo: str):
@@ -166,8 +185,8 @@ class HfAdapter(ProtocolAdapter):
 
     # ---- route handlers ------------------------------------------------
 
-    async def _model_info(self, repo_id: str, request: Request) -> JSONResponse:
-        revision_param = request.query_params.get("revision", "main")
+    async def _model_info(self, repo_id: str, request: Request, revision: str | None = None) -> JSONResponse:
+        revision_param = revision or request.query_params.get("revision", "main")
         try:
             commit = self._repo.resolve_ref(repo_id, revision_param)
         except RepositoryNotFound:
@@ -180,13 +199,14 @@ class HfAdapter(ProtocolAdapter):
         except (RepositoryNotFound, RevisionNotFound) as exc:
             raise HTTPException(status_code=404, detail=str(exc))
 
-        siblings = [{"rfilename": f.path} for f in files]
+        siblings = [{"rfilename": f.path, "size": f.size} for f in files]
+        fetched_at = _hf_datetime(self._repo.get_manifest(repo_id, commit).revision.fetched_at)
         body = {
             "id": repo_id,
             "modelId": repo_id,
             "author": repo_id.split("/", 1)[0] if "/" in repo_id else "",
             "sha": commit,
-            "lastModified": None,
+            "lastModified": fetched_at,
             "private": False,
             "gated": False,
             "disabled": False,
@@ -195,12 +215,16 @@ class HfAdapter(ProtocolAdapter):
             "likes": 0,
             "siblings": siblings,
             "spaces": [],
-            "createdAt": None,
+            "createdAt": fetched_at,
             "paperArxivId": None,
         }
         return JSONResponse(content=body)
 
-    async def _tree(self, repo_id: str, rev: str, file_path: str) -> JSONResponse:
+    async def _tree(self, repo_id: str, rev: str, file_path: str, request: Request) -> JSONResponse:
+        """The Hub's tree listing. Without ?recursive the direct children of `file_path` (files and sub-folders); with
+        ?recursive=true EVERY file below it (plus the folders on the way). Paths are always repo-relative. huggingface_hub's
+        snapshot_download lists a repo with recursive=true: until 2026-11-04 this route ignored it and returned only the
+        top-level folder name, so every file in a sub-folder (GGUF quant folders, diffusers, onnx/) was silently not downloaded."""
         try:
             files = self._repo.list_files(repo_id, rev)
         except RepositoryNotFound:
@@ -208,30 +232,40 @@ class HfAdapter(ProtocolAdapter):
         except RevisionNotFound:
             raise HTTPException(status_code=404, detail=f"revision {rev!r} not found")
 
-        prefix = file_path.rstrip("/") + "/" if file_path else ""
-        entries = []
-        for f in files:
-            if prefix and not f.path.startswith(prefix):
-                continue
-            rel = f.path[len(prefix):] if prefix else f.path
-            # Only surface direct children (not nested) for a non-recursive listing,
-            # but HF clients with recursive=true want everything. We return all
-            # matching files as 'file' entries; clients tolerate flat lists.
-            if "/" in rel and prefix == "" and not file_path:
-                # Top-level listing: show directory entries for nested paths.
-                top = rel.split("/", 1)[0]
-                if not any(e["path"] == top for e in entries):
-                    entries.append({"type": "directory", "path": top, "oid": None, "size": 0})
-                continue
-            entries.append({
-                "type": "file",
-                "path": f.path,
-                "size": f.size,
-                "oid": f.blob.split(":", 1)[1],
-                "lfs": None,
-            })
-        entries.sort(key=lambda e: (e["type"] != "directory", e["path"]))
-        return JSONResponse(content=entries)
+        recursive = request.query_params.get("recursive", "").lower() in ("1", "true", "yes")
+        base = file_path.strip("/")
+        base_slash = base + "/" if base else ""
+        commit = self._repo.resolve_ref(repo_id, rev)
+
+        def file_entry(f) -> dict:
+            return {"type": "file", "path": f.path, "size": f.size, "oid": f.blob.split(":", 1)[1], "lfs": None}
+
+        def dir_entry(path: str) -> dict:
+            import hashlib
+            return {"type": "directory", "path": path, "size": 0,
+                    "oid": hashlib.sha1(f"{commit}:{path}".encode()).hexdigest()}
+
+        exact = [f for f in files if f.path == base]
+        if base and exact:                                  # the path names one file
+            return JSONResponse(content=[file_entry(exact[0])])
+        below = [f for f in files if f.path.startswith(base_slash)] if base else list(files)
+        if base and not below:
+            raise HTTPException(status_code=404, detail=f"path {base!r} not found in {repo_id}@{rev}")
+
+        out: dict[str, dict] = {}
+        for f in below:
+            parts = f.path[len(base_slash):].split("/")
+            if recursive:
+                for i in range(1, len(parts)):
+                    d = base_slash + "/".join(parts[:i])
+                    out.setdefault("d:" + d, dir_entry(d))
+                out["f:" + f.path] = file_entry(f)
+            elif len(parts) == 1:
+                out["f:" + f.path] = file_entry(f)
+            else:
+                d = base_slash + parts[0]
+                out.setdefault("d:" + d, dir_entry(d))
+        return JSONResponse(content=sorted(out.values(), key=lambda e: (e["path"], e["type"])))
 
     async def _refs(self, repo_id: str) -> JSONResponse:
         try:
@@ -253,7 +287,7 @@ class HfAdapter(ProtocolAdapter):
                 "title": manifest.revision.commit,
                 "message": None,
                 "authors": [],
-                "date": manifest.revision.fetched_at,
+                "date": _hf_datetime(manifest.revision.fetched_at),
             }
         ])
 
@@ -297,8 +331,10 @@ class HfAdapter(ProtocolAdapter):
             commit = self._repo.resolve_ref(repo_id, rev)
 
         # HEAD must return the same headers without a body.
+        # Only a URL that names a commit is immutable; .../resolve/main/... moves when main moves.
+        immutable = bool(_COMMIT_RE.match(rev))
         if request.method == "HEAD":
-            return _resolve_head(commit, etag, size)
+            return _resolve_head(commit, etag, size, immutable)
 
         range_header = request.headers.get("range")
         if range_header:
@@ -317,7 +353,7 @@ class HfAdapter(ProtocolAdapter):
                         yield chunk
 
             headers = _resolve_headers(commit, etag, size, length=length,
-                                       content_range=(start, end, size))
+                                       content_range=(start, end, size), immutable=immutable)
             return StreamingResponse(iter_chunked(), status_code=206, headers=headers)
 
         # Full file: stream the whole blob with 200.
@@ -329,12 +365,12 @@ class HfAdapter(ProtocolAdapter):
                         break
                     yield chunk
 
-        headers = _resolve_headers(commit, etag, size)
+        headers = _resolve_headers(commit, etag, size, immutable=immutable)
         return StreamingResponse(iter_full(), status_code=200, headers=headers)
 
 
 def _resolve_headers(commit: str, etag: str, size: int, *,
-                     length: int | None = None, content_range=None) -> dict[str, str]:
+                     length: int | None = None, content_range=None, immutable: bool = False) -> dict[str, str]:
     h = {
         "X-Repo-Commit": commit,
         "ETag": etag,
@@ -343,7 +379,7 @@ def _resolve_headers(commit: str, etag: str, size: int, *,
         # X-Linked-* are the preferred HF headers; we set both for safety.
         "X-Linked-Etag": etag,
         "X-Linked-Size": str(size),
-        "Cache-Control": "public, max-age=31536000, immutable",
+        "Cache-Control": "public, max-age=31536000, immutable" if immutable else "no-cache",
     }
     if content_range is not None:
         start, end, total = content_range
@@ -351,5 +387,5 @@ def _resolve_headers(commit: str, etag: str, size: int, *,
     return h
 
 
-def _resolve_head(commit: str, etag: str, size: int) -> Response:
-    return Response(status_code=200, headers=_resolve_headers(commit, etag, size))
+def _resolve_head(commit: str, etag: str, size: int, immutable: bool = False) -> Response:
+    return Response(status_code=200, headers=_resolve_headers(commit, etag, size, immutable=immutable))

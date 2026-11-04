@@ -132,9 +132,9 @@ class RepositoryCore:
 
     # ---- writes --------------------------------------------------------
 
-    def put_blob(self, src: Path, expected_digest: HEX | None = None) -> StoredBlob:
+    def put_blob(self, src: Path, expected_digest: HEX | None = None, *, verified: bool = False) -> StoredBlob:
         """Content-address a staged file into the blob store. Emits BlobStored."""
-        blob = self._storage.blobs.put_file(src, expected_digest=expected_digest)
+        blob = self._storage.blobs.put_file(src, expected_digest=expected_digest, verified=verified)
         self._events.emit(
             events.BLOB_STORED, digest=blob.digest, size=blob.size, repo=None
         )
@@ -182,6 +182,18 @@ class RepositoryCore:
     def repository_created(self, repo_id: str) -> None:
         """Emit RepositoryCreated. Idempotent marker that a repo now exists."""
         self._events.emit(events.REPOSITORY_CREATED, repo_id=repo_id)
+
+    # ---- locks ---------------------------------------------------------
+
+    def ingest_lock(self):
+        """Held SHARED by an ingest from its first stored blob to its published manifest (see locks.py)."""
+        from .locks import store_lock
+        return store_lock(self._storage.root, exclusive=False, wait=True)
+
+    def gc_lock(self):
+        """Held EXCLUSIVE by GC; raises StoreBusy at once while an ingest runs."""
+        from .locks import store_lock
+        return store_lock(self._storage.root, exclusive=True, wait=False)
 
     # ---- maintenance ---------------------------------------------------
 

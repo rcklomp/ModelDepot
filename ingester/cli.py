@@ -108,6 +108,8 @@ def _build_parser() -> argparse.ArgumentParser:
     # ---- gc ----
     gc = sub.add_parser("gc", help="delete unreferenced blobs")
     gc.add_argument("--dry-run", action="store_true", help="report only, don't delete")
+    gc.add_argument("--min-age", type=int, default=3600, metavar="SECONDS",
+                    help="never delete a blob younger than this (default 3600)")
     gc.set_defaults(func=_cmd_gc)
 
     # ---- jobs ----
@@ -405,23 +407,21 @@ def _cmd_verify(args) -> int:
 
 
 def _cmd_gc(args) -> int:
+    from . import jobs
+    from server.locks import StoreBusy
+
     settings = load_settings()
     storage = FilesystemStorage(settings)
     repo = RepositoryCore(storage, events.EventLog(storage.events_path))
-    reachable = repo.collect_reachable_blobs()
-    present = set(repo.iter_blobs())
-    orphans = sorted(present - reachable)
-    if not orphans:
-        print("no unreferenced blobs")
-        return 0
-    for digest in orphans:
-        if args.dry_run:
-            print(f"  would delete sha256:{digest}")
-        else:
-            repo.delete_blob(digest)
-            print(f"  deleted sha256:{digest}")
-    print(f"{len(orphans)} unreferenced blob(s) "
-          f"{'reported' if args.dry_run else 'deleted'}")
+    try:
+        report = jobs.gc(repo, dry_run=args.dry_run, min_age_seconds=args.min_age)
+    except StoreBusy as exc:
+        print(f"gc not run: {exc}", file=sys.stderr)
+        return 3
+    for line in report.problems:
+        print(f"  {line}")
+    print(f"{report.acted} unreferenced blob(s) {'reported' if args.dry_run else 'deleted'} "
+          f"({report.checked} blobs checked; blobs younger than {args.min_age}s are never touched)")
     return 0
 
 

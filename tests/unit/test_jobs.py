@@ -52,7 +52,7 @@ def test_gc_deletes_orphans(repo, tmp_path):
     repo.put_blob_bytes(b"orphan-1")
     repo.put_blob_bytes(b"orphan-2")
 
-    report = jobs.gc(repo)
+    report = jobs.gc(repo, min_age_seconds=0)
     assert report.acted == 2
     # Reachable blob still present.
     assert len(list(repo.iter_blobs())) == 1
@@ -63,7 +63,7 @@ def test_gc_dry_run_does_not_delete(repo, tmp_path):
     repo.put_blob_bytes(b"orphan")
     before = len(list(repo.iter_blobs()))
 
-    report = jobs.gc(repo, dry_run=True)
+    report = jobs.gc(repo, dry_run=True, min_age_seconds=0)
     assert report.acted == 1  # counted but not deleted
     assert len(list(repo.iter_blobs())) == before  # still there
 

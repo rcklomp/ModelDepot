@@ -78,10 +78,8 @@ def dump_json(manifest: Manifest) -> str:
 
 def write_atomic(manifest: Manifest, dest: Path) -> None:
     """Write a manifest to `dest` via a temp file + atomic rename."""
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(".json.tmp")
-    tmp.write_text(dump_json(manifest) + "\n", encoding="utf-8")
-    tmp.replace(dest)
+    from .fsutil import atomic_write_text
+    atomic_write_text(dest, dump_json(manifest) + "\n")
 
 
 def read(path: Path) -> Manifest:

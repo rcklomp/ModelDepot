@@ -99,6 +99,17 @@ def ingest(repo: RepositoryCore, snapshot: StagedSnapshot, *,
 
     Returns an IngestResult. Raises IntegrityMismatch / IncompleteShards / IngestError.
     """
+    # Hold the store lock (shared) from the first stored blob to the published manifest: a GC in between would see our
+    # blobs as unreferenced and delete them (server/locks.py). The download itself happens BEFORE this call, outside the lock.
+    with repo.ingest_lock():
+        return _ingest_locked(repo, snapshot, source_kind=source_kind, source_ref=source_ref, ref_name=ref_name,
+                              license_name=license_name, update_ref=update_ref,
+                              allow_incomplete_shards=allow_incomplete_shards)
+
+
+def _ingest_locked(repo: RepositoryCore, snapshot: StagedSnapshot, *, source_kind: str, source_ref: str | None,
+                   ref_name: str, license_name: str | None, update_ref: bool,
+                   allow_incomplete_shards: bool) -> IngestResult:
     repo_id = snapshot.repo_id
     commit = snapshot.commit
     repo.repository_created(repo_id)
@@ -158,10 +169,8 @@ def _store_one(repo: RepositoryCore, staged: StagedFile) -> tuple[str, str]:
     into the blob store), the blob is assumed already present and we look it up
     by the expected digest. This makes re-ingest of the same commit idempotent.
     """
-    expected = staged.sha256 or _sha256_file_or_none(staged.local_path)
-
     if staged.local_path.is_file():
-        actual = _sha256_file(staged.local_path)
+        actual = _sha256_file(staged.local_path)       # the ONE read of the file: put_blob trusts it (verified=True)
         # LFS files carry an authoritative upstream sha256 — verify it.
         if staged.sha256 and staged.sha256.lower() != actual.lower():
             repo._events.emit(
@@ -169,10 +178,11 @@ def _store_one(repo: RepositoryCore, staged: StagedFile) -> tuple[str, str]:
                 path=staged.path, expected=staged.sha256, actual=actual,
             )
             raise IntegrityMismatch(staged.path, staged.sha256, actual)
-        blob = repo.put_blob(staged.local_path, expected_digest=actual)
+        blob = repo.put_blob(staged.local_path, expected_digest=actual, verified=True)
         return f"sha256:{blob.digest}", blob.digest
 
     # Staged file is gone — it must already be in the blob store (prior ingest).
+    expected = staged.sha256
     if expected and repo._storage.blobs.exists(expected):
         return f"sha256:{expected}", expected
 

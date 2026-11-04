@@ -18,6 +18,7 @@ from typing import Callable
 
 from server import events
 from server.index import IndexBackend
+from server.locks import StoreBusy
 from server.repository import RepositoryCore
 
 
@@ -56,20 +57,37 @@ def integrity(repo: RepositoryCore) -> Report:
 
 # ---- garbage collection ----------------------------------------------
 
-def gc(repo: RepositoryCore, *, dry_run: bool = False) -> Report:
-    """Delete unreferenced blobs. Reachability is derived from manifests (no
-    stored refcounts). Emits GCDeletedBlob per deleted blob."""
-    reachable = repo.collect_reachable_blobs()
-    present = set(repo.iter_blobs())
-    orphans = sorted(present - reachable)
-    report = Report(job="gc", ok=True, checked=len(present))
-    for digest in orphans:
-        if dry_run:
-            report.problems.append(f"would delete sha256:{digest}")
-        else:
-            repo.delete_blob(digest)
-        report.acted += 1
-    return report
+GC_MIN_AGE_SECONDS = 3600
+
+
+def gc(repo: RepositoryCore, *, dry_run: bool = False, min_age_seconds: int = GC_MIN_AGE_SECONDS) -> Report:
+    """Delete unreferenced blobs. Reachability is derived from manifests (no stored refcounts). Emits GCDeletedBlob per
+    deleted blob.
+
+    Safe against a download in progress: it takes the store lock exclusively and does not wait (StoreBusy while an ingest
+    runs), and it never touches a blob younger than `min_age_seconds` (belt and braces for the moment between two locks).
+    """
+    import time
+
+    with repo.gc_lock():
+        reachable = repo.collect_reachable_blobs()
+        present = set(repo.iter_blobs())
+        orphans = sorted(present - reachable)
+        report = Report(job="gc", ok=True, checked=len(present))
+        now = time.time()
+        for digest in orphans:
+            try:
+                age = now - repo._storage.blobs.path_for(digest).stat().st_mtime
+            except OSError:
+                continue
+            if age < min_age_seconds:
+                continue
+            if dry_run:
+                report.problems.append(f"would delete sha256:{digest}")
+            else:
+                repo.delete_blob(digest)
+            report.acted += 1
+        return report
 
 
 # ---- index rebuild ----------------------------------------------------
@@ -102,7 +120,11 @@ def replication_report(repo: RepositoryCore, target_desc: str = "") -> Report:
 def run_all(repo: RepositoryCore, index: IndexBackend | None = None) -> list[Report]:
     """Run integrity + gc (+ index rebuild if an index is given). Returns the
     reports. Suitable for a nightly cron/Task Scheduler job."""
-    reports = [integrity(repo), gc(repo)]
+    reports = [integrity(repo)]
+    try:
+        reports.append(gc(repo))
+    except StoreBusy as exc:
+        reports.append(Report(job="gc", ok=True, problems=[f"skipped: {exc}"]))
     if index is not None:
         reports.append(index_rebuild(repo, index))
     return reports

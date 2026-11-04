@@ -13,14 +13,18 @@ the /healthz endpoint. Run with:
 """
 from __future__ import annotations
 
+import shutil
+
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 from . import events
 from .adapters.hf_adapter import HfAdapter
+from .auth import ReadTokenGate
 from .config import Settings, settings
 from .index import open_index
 from .repository import RepositoryCore
-from .storage import FilesystemStorage
+from .storage import FilesystemStorage, InvalidRepoId
 
 
 def create_app(settings_override: "Settings | None" = None,
@@ -50,10 +54,19 @@ def create_app(settings_override: "Settings | None" = None,
     app.state.events = event_log
 
     HfAdapter(repo).mount(app)
+    if active_settings.auth_token:
+        app.add_middleware(ReadTokenGate, token=active_settings.auth_token)
+
+    @app.exception_handler(InvalidRepoId)
+    async def invalid_repo_id(request, exc):
+        return JSONResponse({"detail": "invalid repository id"}, status_code=404)
 
     @app.get("/healthz")
     async def healthz():
-        return {"ok": True, "repos": len(repo.list_repos())}
+        usage = shutil.disk_usage(active_settings.mirror_root)
+        sid = active_settings.store_id_path
+        return {"ok": True, "repos": len(repo.list_repos()), "free_bytes": usage.free, "total_bytes": usage.total,
+                "store_id": sid.read_text().strip() if sid.is_file() else None}
 
     return app
 

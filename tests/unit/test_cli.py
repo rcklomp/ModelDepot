@@ -73,7 +73,7 @@ def test_verify_reports_ok(mirror_root: Path, capsys):
 
 def test_gc_deletes_orphan(mirror_root: Path, capsys):
     _populate(mirror_root)
-    rc = cli.main(["gc"])
+    rc = cli.main(["gc", "--min-age", "0"])
     out = capsys.readouterr().out
     assert rc == 0
     assert "deleted" in out.lower() or "1 unreferenced" in out
@@ -81,7 +81,7 @@ def test_gc_deletes_orphan(mirror_root: Path, capsys):
 
 def test_gc_dry_run_does_not_delete(mirror_root: Path, capsys):
     _populate(mirror_root)
-    cli.main(["gc", "--dry-run"])
+    cli.main(["gc", "--dry-run", "--min-age", "0"])
     out = capsys.readouterr().out
     assert "would delete" in out
 

@@ -22,7 +22,8 @@ All GET (the mirror is read-only; ingest happens via the CLI).
 | Endpoint | Status | Purpose |
 |---|---|---|
 | `GET /api/models/{repo_id}` | ✅ implemented + tested | Model metadata (`sha`, `siblings`, `private`, `gated`) |
-| `GET /api/models/{org}/{repo}/tree/{rev}/{path?}` | ✅ implemented + tested | File listing |
+| `GET /api/models/{org}/{repo}/revision/{rev}` | ✅ implemented + tested with the real client | Metadata at a revision: what `snapshot_download`, `hf download` and `model_info(revision=...)` call. Missing until 2026-11-04: whole-repo downloads failed with a 404. |
+| `GET /api/models/{org}/{repo}/tree/{rev}/{path?}` | ✅ implemented + tested with the real client | File listing. Without `?recursive` the direct children of `path` (files and folders); with `?recursive=true` every file below it. Until 2026-11-04 `recursive` was ignored, so files in sub-folders were silently skipped by `snapshot_download`. |
 | `GET /{repo_id}/resolve/{rev}/{filename}` | ✅ implemented + tested (GET + HEAD) | Blob download — the load-bearing route |
 | `GET /api/models/{org}/{repo}/refs` | ✅ implemented + tested | Branch/tag references |
 | `GET /api/models/{org}/{repo}/commits/{rev}` | ✅ implemented + tested | Commit history (single entry per revision) |
@@ -58,6 +59,18 @@ Civitai:    (planned)  resolve ✓  tree ✓  refs ✗  commits ✗  upload ✗ 
 Filesystem: (planned)  resolve ✓  tree ✓  refs ✗  commits ✗  upload ✗  search ✗
 OCI:        (future)   resolve ✓  tree ✓  refs ✓  commits ✓  upload ✓  search ✗
 ```
+
+## Cache headers
+
+`resolve/<40-hex commit>/...` is `immutable` for a year; `resolve/main/...` (any branch or tag) is `no-cache`, because a ref moves when a new revision is published.
+
+## Authentication
+
+`MIRROR_AUTH_TOKEN`, when set, is required as `Authorization: Bearer <token>` on every Hub route (`/api/models`, `/api/datasets`, `/datasets/...`, `.../resolve/...`): clients set `HF_TOKEN`. `/healthz` stays open. (Until 2026-11-04 the variable was read and never checked.)
+
+## Dates
+
+`lastModified`, `createdAt` and commit dates are `YYYY-MM-DDTHH:MM:SS.mmmZ`: `huggingface_hub` parses only that shape.
 
 ## Intentionally omitted
 
