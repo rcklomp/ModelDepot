@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "llm-repo"
+name = "modeldepot"
 version = "0.2.0"
 description = "A self-hosted Hugging Face-compatible repository for AI models and datasets, with a browser GUI."
 readme = "README.md"

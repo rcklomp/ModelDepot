@@ -244,7 +244,7 @@ def _download_following_redirects(url: str, dest: Path, *, token: str,
     parsed = urllib.parse.urlparse(url)
     is_civitai = parsed.hostname and "civitai.com" in parsed.hostname
 
-    headers = {"User-Agent": "llm-repo-ingester/1.0"}
+    headers = {"User-Agent": "modeldepot-ingester/1.0"}
     if is_civitai:
         headers["Authorization"] = f"Bearer {token}"
 

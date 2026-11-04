@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 # Force a clean config before server.config is imported anywhere.
-os.environ.setdefault("MIRROR_ROOT", "/tmp/llm-repo-unused-default")
+os.environ.setdefault("MIRROR_ROOT", "/tmp/modeldepot-unused-default")
 os.environ.setdefault("MIRROR_INDEX_BACKEND", "sqlite")
 
 

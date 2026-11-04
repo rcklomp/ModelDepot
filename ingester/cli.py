@@ -40,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="repo", description="LLM Repository ingester")
+    p = argparse.ArgumentParser(prog="repo", description="ModelDepot ingester")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # ---- ingest hf ----

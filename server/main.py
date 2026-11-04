@@ -80,7 +80,7 @@ def create_app(settings_override: "Settings | None" = None,
         yield
         ctx.jobs.stop()
 
-    app = FastAPI(title="LLM Repository", version="0.2.0", docs_url="/docs", lifespan=lifespan)
+    app = FastAPI(title="ModelDepot", version="0.2.0", docs_url="/docs", lifespan=lifespan)
     app.state.hub = ctx
     app.state.index = open_index(active_settings.index_backend, active_settings.index_dir)
     app.state.repository = repo

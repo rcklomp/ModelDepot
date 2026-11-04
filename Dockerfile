@@ -1,6 +1,6 @@
 # One image for the whole application: the Hugging Face-compatible server, the GUI and the download worker.
 # Built for the owner's Synology DS713+ (x86-64 Intel Atom, 4 GB RAM, an old kernel):
-#   docker build --platform linux/amd64 -t llm-repo:latest .
+#   docker build --platform linux/amd64 -t modeldepot:latest .
 #
 # - plain `uvicorn` (pure Python), not `uvicorn[standard]`: no uvloop / httptools, nothing built for a newer CPU than an Atom has;
 # - hf-xet (a Rust wheel the Hugging Face client pulls in) is removed: the client is told not to use it (HF_HUB_DISABLE_XET) and it is

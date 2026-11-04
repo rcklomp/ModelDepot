@@ -110,7 +110,7 @@ class Settings:
         if not self.store_id_path.exists():
             self.store_id_path.write_text(uuid.uuid4().hex + "\n")
             if not had_content:
-                logging.getLogger("llm_repo").warning(
+                logging.getLogger("modeldepot").warning(
                     "initialised a NEW EMPTY store at %s: if you expected existing models here, the volume is not mounted", root)
         for d in (
             self.blobs_dir,

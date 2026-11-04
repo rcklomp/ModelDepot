@@ -1,5 +1,5 @@
 // The shell: sidebar, top bar, status bar, hash router and the background polling. One module per screen lives in views/.
-export const APP_NAME = 'LLM Repository';   // the one place to rename the app (index.html has the same text in <title>)
+export const APP_NAME = 'ModelDepot';   // the one place to rename the app (index.html has the same text in <title>)
 
 import { h, icon, api, bytes, speed, plural, copyBtn, origin, errorBox, empty, state, on, emit, setJobs, refreshStatus, every,
   themePref, app, setTitle, ApiError } from './lib.js';

@@ -15,15 +15,15 @@ Over ssh on the NAS (the NAS needs `git` and `docker compose`; if it lacks them 
 
 ```bash
 # A. build on the NAS
-git clone http://klompnas3971.lan:3000/ronald/LLM_repo.git llm-repo && cd llm-repo     # or copy the folder over
-cp .env.example .env && nano .env            # set DATA_DIR=/volume1/docker/llm-repo (create the folder first)
+git clone http://klompnas3971.lan:3000/ronald/ModelDepot.git modeldepot && cd modeldepot     # or copy the folder over
+cp .env.example .env && nano .env            # set DATA_DIR=/volume1/docker/modeldepot (create the folder first)
 docker compose up -d --build
 ```
 
 ```bash
 # B. build on your Mac, ship the image (no build tools needed on the NAS)
-docker build --platform linux/amd64 -t llm-repo:latest .
-docker save llm-repo:latest | ssh <nas> 'docker load'
+docker build --platform linux/amd64 -t modeldepot:latest .
+docker save modeldepot:latest | ssh <nas> 'docker load'
 # then on the NAS, in a folder with docker-compose.yml and .env:  docker compose up -d
 ```
 
@@ -32,7 +32,7 @@ nothing else (no database, no Node).
 
 ## 2. First start
 
-- The server makes an **admin token** and writes it to `DATA_DIR/config/admin-token` (and once to `docker logs llm-repo`). The GUI asks for it the first time you
+- The server makes an **admin token** and writes it to `DATA_DIR/config/admin-token` (and once to `docker logs modeldepot`). The GUI asks for it the first time you
   change something (download, delete, settings) and remembers it in that browser. Browsing the library needs no token. To choose your own, set `MIRROR_ADMIN_TOKEN` in `.env`.
 - Put your **Hugging Face token** in Settings if you want gated models (Llama, Gemma...). It is stored in `DATA_DIR/config/settings.json` (mode 600) and never shown again.
 - If the data folder is **not mounted** (a USB disk missing, a typo in `DATA_DIR`) the server refuses to create it on the system disk and says why in `docker logs`.
@@ -61,7 +61,7 @@ A model that is not in the library gives a 404 and shows up in the GUI's **Wante
 ## 5. Updating, backing up, TLS
 
 - **Update:** pull the new code, `docker compose up -d --build`. The data folder is untouched.
-- **Back up / copy:** the data folder is plain files: `rsync -a --partial --inplace /volume1/docker/llm-repo/ other-nas:/volume1/docker/llm-repo/` (`scripts/rsync-to-target.sh` wraps this). Stop the container or avoid copying while a download is being stored.
+- **Back up / copy:** the data folder is plain files: `rsync -a --partial --inplace /volume1/docker/modeldepot/ other-nas:/volume1/docker/modeldepot/` (`scripts/rsync-to-target.sh` wraps this). Stop the container or avoid copying while a download is being stored.
 - **Integrity:** Storage -> "Check integrity" re-hashes every file and lists any that are damaged.
 - **TLS** (only if a tool insists on https): use DSM's reverse proxy (Control Panel -> Login Portal -> Advanced -> Reverse Proxy, `https://<nas>:443` -> `http://localhost:8090`).
 - Do **not** publish port 8090 to the internet: the Hugging Face routes are open on your LAN by default.

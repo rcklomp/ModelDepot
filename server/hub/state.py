@@ -15,7 +15,7 @@ from pathlib import Path
 
 from ..fsutil import atomic_write_text
 
-log = logging.getLogger("llm_repo")
+log = logging.getLogger("modeldepot")
 
 
 def _write_private(path: Path, text: str) -> None:

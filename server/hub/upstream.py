@@ -190,7 +190,7 @@ def hf_describe(*, kind: str, repo_id: str, revision: str = "main", token: str =
 
 def _civitai_get(path: str, params: dict | None, token: str):
     url = CIVITAI_BASE + path + (("?" + urllib.parse.urlencode({k: v for k, v in params.items() if v not in (None, "")})) if params else "")
-    req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "llm-repo/1.0",
+    req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "modeldepot/1.0",
                                                **({"Authorization": f"Bearer {token}"} if token else {})})
     try:
         with urllib.request.urlopen(req, timeout=30) as r:

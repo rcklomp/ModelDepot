@@ -211,7 +211,7 @@ export function infoDialog(title, body) {
 }
 
 // ---------------------------------------------------------------- tokens and the API client
-const LS = { admin: 'llmrepo.adminToken', read: 'llmrepo.readToken', theme: 'llmrepo.theme' };
+const LS = { admin: 'modeldepot.adminToken', read: 'modeldepot.readToken', theme: 'modeldepot.theme' };
 const ls = {
   get: (k) => { try { return localStorage.getItem(k) || ''; } catch { return ''; } },
   set: (k, v) => { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch { /* private mode */ } },

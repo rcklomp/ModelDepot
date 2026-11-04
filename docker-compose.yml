@@ -1,12 +1,12 @@
 # The whole application is ONE container on ONE port.
-#   cp .env.example .env      # set DATA_DIR to a folder on the NAS volume, e.g. /volume1/docker/llm-repo
+#   cp .env.example .env      # set DATA_DIR to a folder on the NAS volume, e.g. /volume1/docker/modeldepot
 #   docker compose up -d --build
 # then open http://<nas>:8090 in a browser (8090, not 8000: the NAS already uses 8000 for the restic backup server).
 services:
-  llm-repo:
+  modeldepot:
     build: .
-    image: llm-repo:latest
-    container_name: llm-repo
+    image: modeldepot:latest
+    container_name: modeldepot
     restart: unless-stopped
     ports:
       - "${PORT:-8090}:8000"

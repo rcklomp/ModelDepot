@@ -1,4 +1,4 @@
-# LLM_repo -- rules for a session started in this repository
+# ModelDepot -- rules for a session started in this repository
 
 **What this is.** A self-hosted, Hugging Face-compatible repository for AI models and datasets (no Spaces), run in a Docker container on the owner's
 Synology DS713+ (Intel Atom D2700, 4 GB RAM, an old kernel, Docker installed), with a browser GUI. Machines on the LAN set `HF_ENDPOINT` to it and
@@ -7,8 +7,10 @@ datasets stay available when the Hub is blocked, rate-limited or gone, and are d
 
 **What it is NOT (owner, 2026-11-04).** It is not part of the Franken-Engine, Colibri or rig projects, and none of their rules, session card or closeout apply
 here. The AI rig is just one client of it, like any other machine. Do not add rig, Franken or Ollama-management code to this repository; the rig's own model
-console moved to colibri (`tools/hot-expert/rig_console/`, frozen copy of this repository's old `console/` at the tag `archive/rig-console`). The name "LLM_repo"
-is the Gitea repository's name and the working name of the app; the owner is choosing a better name (a rename must stay a one-place change).
+console moved to colibri (`tools/hot-expert/rig_console/`, frozen copy of this repository's old `console/` at the tag `archive/rig-console`). The application is
+called **ModelDepot** (the owner chose the name on 2026-11-04; the Gitea repository is `ronald/ModelDepot`, it was `ronald/LLM_repo`, and the old name still redirects).
+The Mac folder is still `~/Projects/LLM_repo` because colibri's closeout check and its tests name that path; the name of the app lives in one place in the GUI
+(`APP_NAME` in `server/ui/app.js`, with the same text in `index.html`'s `<title>`).
 
 **Layout.** `server/` the one app: `adapters/hf_adapter.py` (Hub read routes for models and datasets) and `adapters/hf_upload.py` (create repo, preupload, LFS, commit),
 `hub/` (the GUI's JSON API `api.py`, the download queue `jobs.py` + `runner.py`, upstream search/picker `upstream.py`, `upload.py`, `library.py`, `state.py`), `ui/` (the GUI: plain
@@ -25,7 +27,7 @@ application's host port defaults to **8090**). The image is built for linux/amd6
 - The target is small: one uvicorn worker, no C extensions, no Node build step, nothing that needs more than a few hundred MB. Keep dependencies few.
 - Never delete or rewrite the owner's store (`MIRROR_ROOT`); anything that removes blobs must be safe against a download in progress.
 - Credentials: never read, print, copy or write `~/.config/git/gitea-*credentials`, tokens or ssh keys. Push as `claude-bot` only (credential-store helper), to Gitea
-  `ronald/LLM_repo`, branch `main`. Another agent (the owner's Hermes Agent on the NAS, commits as `hermes-agent`) also pushes here: `git pull --ff-only` first,
+  `ronald/ModelDepot`, branch `main`. Another agent (the owner's Hermes Agent on the NAS, commits as `hermes-agent`) also pushes here: `git pull --ff-only` first,
   never force-push, never rebase published commits.
 - Deploying to the NAS is not something a session can do (no ssh entry for it): a change lands on Gitea `main`; the NAS pulls it and rebuilds the image
   (`docs/DEPLOYMENT.md`). Say that plainly instead of claiming a deploy.
