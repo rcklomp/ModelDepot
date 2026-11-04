@@ -1,4 +1,4 @@
-# LLM Repository (working name)
+# ModelDepot
 
 Your own **Hugging Face for the LAN**: a repository for AI **models and datasets** that runs in one Docker container on a NAS, with a browser GUI.
 Machines on your network point `HF_ENDPOINT` at it, and `hf download`, `transformers`, `datasets`, vLLM, mlx_lm, llama.cpp and Ollama fetch from it as if it were
