@@ -10,9 +10,14 @@ here. The AI rig is just one client of it, like any other machine. Do not add ri
 console moved to colibri (`tools/hot-expert/rig_console/`, frozen copy of this repository's old `console/` at the tag `archive/rig-console`). The name "LLM_repo"
 is the Gitea repository's name and the working name of the app; the owner is choosing a better name (a rename must stay a one-place change).
 
-**Layout.** `server/` the HTTP app and repository core (content-addressed blobs, immutable manifests, mutable refs; plain files, rsync-portable),
-`server/adapters/hf_adapter.py` the Hugging Face routes, `ingester/` downloads and imports (HF, Civitai, local), `scripts/`, `docs/`, `tests/`.
-`docs/DESIGN.md` is the rationale; the principles in the README (storage is the truth, blobs immutable, derived state rebuildable) are not negotiable.
+**Layout.** `server/` the one app: `adapters/hf_adapter.py` (Hub read routes for models and datasets) and `adapters/hf_upload.py` (create repo, preupload, LFS, commit),
+`hub/` (the GUI's JSON API `api.py`, the download queue `jobs.py` + `runner.py`, upstream search/picker `upstream.py`, `upload.py`, `library.py`, `state.py`), `ui/` (the GUI: plain
+JS and CSS, no build step), the core (`repository.py`, `storage.py`, `blobstore.py`, `manifests.py`, `locks.py`: content-addressed blobs, immutable manifests, mutable refs, plain files).
+`ingester/` downloads and imports (HF, Civitai, local, the `repo` CLI). `docs/` (start with ARCHITECTURE.md), `tests/` (unit, contract, `compat/` = the REAL huggingface_hub client against
+a live server, `hub/` = the GUI API). The principles in the README (storage is the truth, blobs immutable, derived state rebuildable) are not negotiable.
+
+**The NAS (facts, 2026-11-04).** Synology DS713+ (`klompnas3971.lan`), DSM 7.1.1, 4 GB RAM, Docker present. Already used there: Gitea on :3000, the restic rest-server on :8000 (so this
+application's host port defaults to **8090**). The image is built for linux/amd64 (`docker build --platform linux/amd64`); on a Mac, Docker Desktop must be started by hand to test it.
 
 **Rules for a session here.**
 - Done = the tests are green AND, for anything a client sees, a probe with the REAL `huggingface_hub` client against a running instance (the unit tests

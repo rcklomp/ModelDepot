@@ -67,10 +67,16 @@ def detail(repo: RepositoryCore, core_id: str) -> dict | None:
     if not base:
         return None
     revisions = []
-    for commit in reversed(repo.list_revisions(core_id)):
+    for commit in repo.list_revisions(core_id):
         m = repo.get_manifest(core_id, commit)
-        revisions.append({"commit": commit, "fetched_at": m.revision.fetched_at,
-                          "files": [{"path": f.path, "size": f.size, "sha256": f.blob.split(":", 1)[1]} for f in m.files]})
+        try:        # commit ids are hashes: order by time (the manifest's second-resolution date, then when the file was written)
+            written = repo._storage.manifest_path(core_id, commit).stat().st_mtime_ns
+        except OSError:
+            written = 0
+        revisions.append(((m.revision.fetched_at or "", written),
+                          {"commit": commit, "fetched_at": m.revision.fetched_at,
+                           "files": [{"path": f.path, "size": f.size, "sha256": f.blob.split(":", 1)[1]} for f in m.files]}))
+    revisions = [r for _, r in sorted(revisions, key=lambda t: t[0], reverse=True)]         # newest first
     readme = None
     latest = next((r for r in revisions if r["commit"] == base["commit"]), None)
     if latest:

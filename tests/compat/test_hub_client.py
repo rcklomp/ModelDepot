@@ -139,3 +139,12 @@ def test_file_system_listing_works(make_live):
     out = r.stdout.strip().splitlines()
     assert "acme/tiny/onnx" in out[0] and "acme/tiny/config.json" in out[0]
     assert "llama" in out[1] and "acme/tiny/onnx/model.onnx" in out[2]
+
+
+def test_get_paths_info_with_the_clients_form_encoded_body(make_live):
+    live = make_live()
+    stage_repo(live.repo)
+    r = live.client("from huggingface_hub import HfApi\n"
+                    "print(sorted((p.path, p.size) for p in HfApi().get_paths_info('acme/tiny', ['config.json', 'onnx/model.onnx', 'nope'])))\n")
+    assert r.returncode == 0, r.stderr[-600:]
+    assert eval(r.stdout.strip().splitlines()[-1]) == [("config.json", len(FILES["config.json"])), ("onnx/model.onnx", len(FILES["onnx/model.onnx"]))]

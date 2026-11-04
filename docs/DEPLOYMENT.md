@@ -4,8 +4,9 @@ The whole application is **one container on one port**: the Hugging Face-compati
 the download worker. Everything worth keeping lives in **one folder** that you mount into the container (`/data`): the models and
 datasets, the download queue, your settings and the admin token. Move or back up that folder and you have moved the application.
 
-Tested on 2026-11-04: the image builds for `linux/amd64`, starts, passes its health check, serves `snapshot_download` to the real
-Hugging Face client, and downloads from huggingface.co through the GUI's queue (Docker Desktop on a Mac, emulating amd64). **Not
+Tested on 2026-11-04: the image builds for `linux/amd64`, starts, passes its health check, serves the GUI with its security headers, serves
+`snapshot_download` to the real Hugging Face client, takes a 20 MB `hf upload` and returns it byte-identical, and downloads from huggingface.co
+through the GUI's queue (Docker Desktop on a Mac, emulating amd64). **Not
 tested on the NAS itself** (a DS713+ has an old kernel and an old Docker): the first start there is the real test; see Troubleshooting.
 
 ## 1. Get the code and the image onto the NAS
@@ -26,7 +27,7 @@ docker save llm-repo:latest | ssh <nas> 'docker load'
 # then on the NAS, in a folder with docker-compose.yml and .env:  docker compose up -d
 ```
 
-Open **http://\<nas\>:8000**. Memory use on the NAS is not measured; the application is one small Python process plus one more while a download runs, and
+Open **http://\<nas\>:8090** (not 8000: your NAS already uses that for the restic backup server; change `PORT` in `.env` if 8090 is taken too). Memory use on the NAS is not measured; the application is one small Python process plus one more while a download runs, and
 nothing else (no database, no Node).
 
 ## 2. First start
@@ -42,7 +43,7 @@ nothing else (no database, no Node).
 The GUI's **Connect** page shows the exact lines for your server. In short, on each machine that should download from the NAS:
 
 ```bash
-export HF_ENDPOINT=http://<nas>:8000
+export HF_ENDPOINT=http://<nas>:8090
 export HF_HUB_DISABLE_XET=1
 hf download Qwen/Qwen3-0.6B            # or transformers, vLLM, mlx_lm, datasets.load_dataset ...
 ```
@@ -62,13 +63,13 @@ A model that is not in the library gives a 404 and shows up in the GUI's **Wante
 - **Update:** pull the new code, `docker compose up -d --build`. The data folder is untouched.
 - **Back up / copy:** the data folder is plain files: `rsync -a --partial --inplace /volume1/docker/llm-repo/ other-nas:/volume1/docker/llm-repo/` (`scripts/rsync-to-target.sh` wraps this). Stop the container or avoid copying while a download is being stored.
 - **Integrity:** Storage -> "Check integrity" re-hashes every file and lists any that are damaged.
-- **TLS** (only if a tool insists on https): use DSM's reverse proxy (Control Panel -> Login Portal -> Advanced -> Reverse Proxy, `https://<nas>:443` -> `http://localhost:8000`).
-- Do **not** publish port 8000 to the internet: the Hugging Face routes are open on your LAN by default.
+- **TLS** (only if a tool insists on https): use DSM's reverse proxy (Control Panel -> Login Portal -> Advanced -> Reverse Proxy, `https://<nas>:443` -> `http://localhost:8090`).
+- Do **not** publish port 8090 to the internet: the Hugging Face routes are open on your LAN by default.
 
 ## Troubleshooting
 
 - **`Operation not permitted` / odd permission errors in the logs on an old DSM:** the Docker there predates the image's glibc. In `docker-compose.yml` uncomment `security_opt: seccomp:unconfined`.
 - **`Permission denied` writing to the data folder:** the folder belongs to a NAS user; set `user: "<uid>:<gid>"` (see `id <user>`) in `docker-compose.yml`.
 - **Download window never opens:** the container's clock zone is UTC unless `TZ` is set in `.env`.
-- **A model downloads but the engine cannot find it:** the engine must use the same `HF_ENDPOINT`; `curl -sI http://<nas>:8000/<org>/<name>/resolve/main/config.json` should answer 200.
+- **A model downloads but the engine cannot find it:** the engine must use the same `HF_ENDPOINT`; `curl -sI http://<nas>:8090/<org>/<name>/resolve/main/config.json` should answer 200.
 - **The older no-Docker install script** (`run-on-synology.sh`) was removed on 2026-11-04: it ran as root without a login, started no GUI or download worker, and its non-root option aborted. It is in the git history.

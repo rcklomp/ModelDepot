@@ -1,7 +1,7 @@
 # The whole application is ONE container on ONE port.
 #   cp .env.example .env      # set DATA_DIR to a folder on the NAS volume, e.g. /volume1/docker/llm-repo
 #   docker compose up -d --build
-# then open http://<nas>:8000 in a browser.
+# then open http://<nas>:8090 in a browser (8090, not 8000: the NAS already uses 8000 for the restic backup server).
 services:
   llm-repo:
     build: .
@@ -9,12 +9,14 @@ services:
     container_name: llm-repo
     restart: unless-stopped
     ports:
-      - "${PORT:-8000}:8000"
+      - "${PORT:-8090}:8000"
     environment:
       TZ: ${TZ:-Europe/Amsterdam}                 # the GUI's download window is local time
       MIRROR_AUTH_TOKEN: ${MIRROR_AUTH_TOKEN:-}   # optional: clients must send it (HF_TOKEN) to download
       MIRROR_ADMIN_TOKEN: ${MIRROR_ADMIN_TOKEN:-} # optional: otherwise made on first start, kept in the data folder
       MIRROR_HF_TOKEN: ${MIRROR_HF_TOKEN:-}       # optional: your Hugging Face token (can also be set in the GUI)
+      MIRROR_NAMESPACE: ${MIRROR_NAMESPACE:-local} # optional: the organisation a bare `create_repo("name")` gets (uploads)
+      MIRROR_READ_ONLY: ${MIRROR_READ_ONLY:-}     # optional: 1 = refuse every upload (403)
     volumes:
       - ${DATA_DIR:-./data}:/data                 # the store, the queue and the settings: everything worth keeping
     # On Synology, files in DATA_DIR belong to a NAS user. Run as that user instead of root (find the numbers with `id <user>`):

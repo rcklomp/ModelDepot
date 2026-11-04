@@ -72,6 +72,8 @@ def create_router(ctx) -> APIRouter:
             raise HTTPException(401, "a token is required to look at this library")
 
     def require_admin(request: Request) -> None:
+        if ctx.settings.read_only:
+            raise HTTPException(403, "this server is read-only (MIRROR_READ_ONLY): nothing can be changed")
         if not is_admin(request):
             raise HTTPException(401, "the admin token is required for this action")
 
@@ -87,12 +89,13 @@ def create_router(ctx) -> APIRouter:
     def status():
         du = shutil.disk_usage(ctx.settings.mirror_root)
         sid = ctx.settings.store_id_path
-        repos = ctx.repo.list_repos()
+        repos = [r for r in ctx.repo.list_repos() if ctx.repo.list_revisions(r)]      # a created-but-empty repo is not in the library yet
         return {"store_id": sid.read_text().strip() if sid.is_file() else None, "store_path": str(ctx.settings.mirror_root),
                 "free_bytes": du.free, "total_bytes": du.total, "stored": ctx.usage.get(),
                 "models": sum(1 for r in repos if not r.startswith("datasets/")), "datasets": sum(1 for r in repos if r.startswith("datasets/")),
                 "queue": ctx.jobs.active_summary(), "hf_token_set": bool(ctx.hub_settings.get("hf_token")),
-                "read_token_required": bool(read), "version": "0.2.0"}
+                "read_token_required": bool(read), "namespace": ctx.settings.namespace, "read_only": ctx.settings.read_only,
+                "version": "0.2.0"}
 
     # ---- library -------------------------------------------------------
     @router.get("/library", dependencies=R)
@@ -137,7 +140,7 @@ def create_router(ctx) -> APIRouter:
             else:
                 raise HTTPException(400, "source must be hf or civitai")
         except upstream.UpstreamError as exc:
-            raise HTTPException(exc.status if exc.status in (401, 403, 404) else 502, str(exc))
+            raise HTTPException(exc.status if exc.status in (403, 404) else 502, str(exc))
         have = set(ctx.repo.list_repos())
         for r in res:
             r["in_library"] = r["source"] == "hf" and core_repo_id(r["type"], r["id"]) in have
@@ -153,7 +156,7 @@ def create_router(ctx) -> APIRouter:
             if source == "civitai":
                 return upstream.civitai_describe(version_id=int(id), token=ctx.hub_settings.get("civitai_token"))
         except upstream.UpstreamError as exc:
-            raise HTTPException(exc.status if exc.status in (401, 403, 404) else 502, str(exc))
+            raise HTTPException(exc.status if exc.status in (403, 404) else 502, str(exc))
         except ValueError:
             raise HTTPException(400, "bad id")
         raise HTTPException(400, "source must be hf or civitai")
@@ -194,16 +197,8 @@ def create_router(ctx) -> APIRouter:
             rep = ij.gc(ctx.repo, dry_run=req.dry_run)
         except StoreBusy as exc:
             raise HTTPException(409, str(exc))
-        orphans = [p.replace("would delete sha256:", "") for p in rep.problems]
-        size = 0
-        if req.dry_run:
-            for d in orphans:
-                try:
-                    size += ctx.storage.blobs.size(d)
-                except OSError:
-                    pass
         ctx.usage.invalidate()
-        return {"dry_run": req.dry_run, "blobs": rep.acted, "checked": rep.checked, "bytes": size if req.dry_run else None}
+        return {"dry_run": req.dry_run, "blobs": rep.acted, "checked": rep.checked, "bytes": rep.bytes}
 
     # ---- wanted / settings ----------------------------------------------------
     @router.get("/wanted", dependencies=R)

@@ -98,3 +98,11 @@ def test_manifest_and_refs_are_written_durably(repo, tmp_path, monkeypatch):
     monkeypatch.setattr(os, "fsync", lambda fd: (synced.append(fd), real(fd))[1])
     transaction.ingest(repo, _snapshot(tmp_path, {"config.json": b"{}"}))
     assert len(synced) >= 6        # blob (file + dir) + manifest (file + dir) + refs (file + dir)
+
+
+def test_gc_reports_the_bytes_it_frees(repo, tmp_path):
+    f = tmp_path / "x"
+    f.write_bytes(b"x" * 1234)
+    repo.put_blob(f)
+    assert jobs.gc(repo, dry_run=True, min_age_seconds=0).bytes == 1234
+    assert jobs.gc(repo, min_age_seconds=0).bytes == 1234

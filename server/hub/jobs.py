@@ -136,9 +136,11 @@ class JobManager:
 
     def active_summary(self) -> dict:
         with self._lock:
-            running = [j for j in self._jobs.values() if j.status == "running"]
-            return {"running": len(running), "queued": sum(1 for j in self._jobs.values() if j.status == "queued"),
-                    "speed_bps": sum(j.speed_bps for j in running)}
+            dl = [j for j in self._jobs.values() if j.kind == "download"]       # an integrity check is not a download
+            running = [j for j in dl if j.status == "running"]
+            return {"running": len(running), "queued": sum(1 for j in dl if j.status == "queued"),
+                    "speed_bps": sum(j.speed_bps for j in running),
+                    "checks_running": sum(1 for j in self._jobs.values() if j.kind == "verify" and j.status == "running")}
 
     def submit_download(self, spec: dict) -> tuple[Job, bool]:
         """Queue a download. Returns (job, already_queued). Raises ValueError with a message meant for the user."""

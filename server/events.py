@@ -80,3 +80,4 @@ GC_DELETED_BLOB = "GCDeletedBlob"
 INTEGRITY_FAILED = "IntegrityFailed"
 INDEX_REBUILT = "IndexRebuilt"
 REPOSITORY_DELETED = "RepositoryDeleted"
+UPLOAD_COMMITTED = "UploadCommitted"          # a revision published from an upload (carries the commit summary: manifests have no field for it)

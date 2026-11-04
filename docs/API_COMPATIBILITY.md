@@ -17,7 +17,7 @@ time and routes all resolution and downloads there.
 
 ## Implemented endpoints
 
-All GET (the mirror is read-only; ingest happens via the CLI).
+All GET: this is what a client needs to download. The write routes (publishing your own repos) are under [Uploading](#uploading).
 
 | Endpoint | Status | Purpose |
 |---|---|---|
@@ -54,7 +54,7 @@ Behavior:
 ## Adapter capability matrix
 
 ```
-HF:         resolve ✓  tree ✓  refs ✓  commits ✓  upload ✗  search ✗
+HF:         resolve ✓  tree ✓  refs ✓  commits ✓  upload ✓  search ✗
 Civitai:    (planned)  resolve ✓  tree ✓  refs ✗  commits ✗  upload ✗  search ✗
 Filesystem: (planned)  resolve ✓  tree ✓  refs ✗  commits ✗  upload ✗  search ✗
 OCI:        (future)   resolve ✓  tree ✓  refs ✓  commits ✓  upload ✓  search ✗
@@ -77,6 +77,7 @@ Storage: datasets live in `<root>/datasets/<org>/<name>` (models stay in `<root>
 ## Authentication
 
 `MIRROR_AUTH_TOKEN`, when set, is required as `Authorization: Bearer <token>` on every Hub route (`/api/models`, `/api/datasets`, `/datasets/...`, `.../resolve/...`): clients set `HF_TOKEN`. `/healthz` stays open. (Until 2026-11-04 the variable was read and never checked.)
+The admin token passes the same gate (it is the stronger credential, and `huggingface_hub` sends one token only: whoever publishes needs to get through). The read token never writes.
 
 ## Dates
 
@@ -87,11 +88,55 @@ Storage: datasets live in `<root>/datasets/<org>/<name>` (models stay in `<root>
 - **Xet chunk protocol.** Avoided via `HF_HUB_DISABLE_XET=1`. If Xet ever
   becomes mandatory for public downloads, the adapter will need to grow.
 - **Spaces** (`/api/spaces/...`, `/spaces/...`). Never: a Space is an app, not a stored artifact.
-- **Write/upload endpoints** (`POST /api/models/...`, LFS upload). The mirror is
-  read-only; ingest happens through the CLI on a trusted box.
+- **Pull requests, other branches, `copyFile`, resumable/multipart LFS, Xet upload, private repos, Spaces**: see [Uploading](#uploading).
 - **Search** (`/api/models?search=...`). Out of scope; use `repo list` locally.
 - **LM Studio's internal catalog.** Not an HF API; LM Studio consumes the mirror
   via local-file import (see CLIENT_SETUP.md).
+
+## Uploading
+
+The Hub's write protocol, so people can publish their own models and datasets with the REAL client: `HfApi.create_repo`, `upload_file`,
+`upload_folder` (with `delete_patterns`), `delete_file`, `delete_folder`, `whoami`, `repo_exists`, and the `hf upload` CLI, for
+`repo_type="model"` and `"dataset"`. Tested against a live server with the real `huggingface_hub` in `tests/compat/test_upload.py`.
+The code is `server/adapters/hf_upload.py` (routes) and `server/hub/upload.py` (the commit logic, shared with the GUI's web upload).
+
+Client side: `HF_ENDPOINT=http://<mirror>:<port>`, `HF_HUB_DISABLE_XET=1` (Xet upload is not implemented; without the variable a client that
+has `hf_xet` installed asks for a Xet write token and fails with `Network error ... 404 ... /xet-write-token/main`), and `HF_TOKEN=<the ADMIN token>` (`<store>/config/admin-token` or `MIRROR_ADMIN_TOKEN`).
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/whoami-v2` | `{type:"user", id:"admin", name:<MIRROR_NAMESPACE, default "local">, fullname, auth:{type:"access_token", accessToken:{role:"write"}}}` for the admin token; 401 for anything else (the read token included) |
+| `POST /api/repos/create` `{type, name, organization?}` | creates an EMPTY repository (no revision yet). `organization` defaults to the namespace. 409 if it exists (the body carries `url`, which is what `exist_ok=True` reads), 400 for `space`, for a private repo and for a bad name |
+| `POST /api/validate-yaml` | the client checks a README.md's front matter here before it uploads one; always `{errors:[], warnings:[]}` |
+| `POST /api/{models\|datasets}/{org}/{repo}/preupload/main` | per file `uploadMode`: `"lfs"` when the file is bigger than 1 MiB or ends in `.safetensors .gguf .bin .pt .pth .ckpt .onnx .parquet .arrow .h5 .npz .zip .tar .gz .zst`, else `"regular"`; `shouldIgnore:false`; `oid` = the id of the file already at that path (sha256 for LFS, git blob sha1 for regular), so the client skips unchanged files; `commitOid` = the head or `null` |
+| `POST [/datasets]/{org}/{repo}.git/info/lfs/objects/batch` | git-LFS batch (`application/vnd.git-lfs+json`), `transfer:"basic"`: per object `actions.upload` and `actions.verify` with absolute URLs on THIS server (scheme and host from the request, or `X-Forwarded-Proto/Host`); no `actions` when the blob is already stored |
+| `PUT /_lfs/{oid}?size=&exp=&sig=` | the file's bytes, streamed to `<store>/staging/uploads/<oid>.part`, size checked, renamed to `<oid>`. One PUT per file |
+| `POST /_lfs/{oid}/verify?size=&exp=&sig=` | hashes the staged file once; 422 (and the bytes are deleted) when it is not the announced sha256 |
+| `POST /api/{models\|datasets}/{org}/{repo}/commit/main` | NDJSON commit: `header`, `file` (base64 or utf-8), `lfsFile`, `deletedFile`, `deletedFolder`. Answers `{success, commitOid, commitUrl, hookOutput}` |
+
+How a commit becomes a revision: the new revision is the files of the current head with the commit's changes applied, in order; regular files
+are hashed and stored, LFS files are moved from staging into the blob store (they were hashed at verify; one not verified is hashed once at
+commit); the manifest has `source.kind = "upload"` and each file's etag is the sha256 (LFS) or the git blob sha1 (regular), as on the Hub; the
+commit id is a sha1 over parent, summary, the (path, sha256) list and a timestamp; the revision is published and `main` moved. All of that runs
+under the store lock (`ingest_lock`, see ARCHITECTURE.md), so a garbage collection cannot delete the blobs between "stored" and "published";
+a GC that is running makes the commit wait. Commits to one repository are serialised, so two concurrent uploads never both start from the same head.
+A commit that changes nothing is a success that returns the current head and publishes no new revision. `parentCommit` that is not the head is 409.
+The commit summary and description are not part of the manifest (it has no field for them); they are in `events.jsonl` (`UploadCommitted`).
+
+The signed URLs: the client does not send its Authorization header to the LFS PUT (the Hub's real URL points at S3), so each URL carries an
+HMAC over (purpose, oid, size, expiry) keyed with the admin token, valid for one hour. `/_lfs/...` is not behind the read gate, so it works
+with or without `MIRROR_AUTH_TOKEN`; the admin token in a header opens it too. Staged data nobody committed is swept after 2 days
+(web-upload sessions after 7).
+
+Every write route needs the admin token: missing or wrong gives 401 `{"error": ...}` (with `X-Error-Message`); `MIRROR_READ_ONLY=1` gives 403
+on all of them (checked first). `MIRROR_AUTH_TOKEN` (the read token) can read, and never writes.
+
+**Not supported** (answered with a clear 400, not silently ignored): branches other than `main` and pull requests (`revision=...`, `create_pr=True`),
+`copyFile` (upload the file again), private repositories (`private=True`: the whole mirror is private when `MIRROR_AUTH_TOKEN` is set), Spaces,
+the `kernel` repo type, resumable or multipart LFS (one PUT per file, so a failed 50 GB upload starts over), Xet (`HF_HUB_DISABLE_XET=1`),
+`gitIgnore` handling (every file is accepted), deleting a repository through the Hub API (use the GUI), `upload_large_folder`.
+A new repository's name follows the Hub's shape (letters, digits, `-_.`, at most 96, no `--` or `..`; the namespaces `api datasets spaces models` are reserved).
+A repository that was created and never uploaded to exists (`repo_exists` is true, `model_info().sha` is `null`, its file list is empty) but the GUI library shows repositories with content only.
 
 ## Engine coverage (validated in `tests/engines/test_matrix.py`)
 

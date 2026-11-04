@@ -28,6 +28,7 @@ class Report:
     ok: bool
     checked: int = 0
     acted: int = 0
+    bytes: int = 0                 # gc: what the deleted (or, on a dry run, deletable) blobs occupy
     problems: list[str] = field(default_factory=list)
 
     def __str__(self) -> str:
@@ -82,6 +83,10 @@ def gc(repo: RepositoryCore, *, dry_run: bool = False, min_age_seconds: int = GC
                 continue
             if age < min_age_seconds:
                 continue
+            try:
+                report.bytes += repo._storage.blobs.size(digest)
+            except OSError:
+                pass
             if dry_run:
                 report.problems.append(f"would delete sha256:{digest}")
             else:

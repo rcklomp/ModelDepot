@@ -5,7 +5,7 @@ Machines on your network point `HF_ENDPOINT` at it, and `hf download`, `transfor
 huggingface.co. (No Spaces: they are apps, not files.)
 
 ```bash
-export HF_ENDPOINT=http://<nas>:8000
+export HF_ENDPOINT=http://<nas>:8090
 export HF_HUB_DISABLE_XET=1
 hf download Qwen/Qwen3-0.6B
 ```
@@ -23,6 +23,7 @@ hf download Qwen/Qwen3-0.6B
 - **A download queue that is safe for big files:** one at a time, optional night-time window, resumes after a drop or a restart, refuses what will not fit, checks every file's sha256.
 - **"Wanted":** when a machine asks for a model the library lacks, it shows up with a one-click Download.
 - **Models and datasets**, including the legacy short names (`gpt2`, `squad`). Tested with the real `huggingface_hub`, `hf download --repo-type dataset` and `datasets.load_dataset`.
+- **Publish your own:** push your fine-tunes and datasets with the normal tools (`hf upload`, `HfApi.upload_folder`, `HF_TOKEN=<admin token>`) or drag a folder into the GUI's Upload page. Each upload is one new revision; old revisions keep serving their bytes.
 - **Safe by construction:** blobs are stored by sha256 and never change; garbage collection and delete can never remove the files of a running download; writes are fsync'd.
 
 ## Run it (Synology DS713+ or any Docker host)
@@ -32,7 +33,7 @@ cp .env.example .env        # set DATA_DIR to a folder on the NAS volume
 docker compose up -d --build
 ```
 
-Open `http://<nas>:8000`. The first admin action asks for the admin token the server made (`DATA_DIR/config/admin-token`). Full walkthrough, backup and
+Open `http://<nas>:8090`. The first admin action asks for the admin token the server made (`DATA_DIR/config/admin-token`). Full walkthrough, backup and
 troubleshooting: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). Not yet tested on the DS713+ itself (an old kernel and Docker): the image builds for `linux/amd64` and passes its checks elsewhere.
 
 ## Develop
@@ -46,9 +47,9 @@ MIRROR_ROOT=./data uvicorn server.main:app --reload
 
 Command line (inside the container: `docker exec llm-repo repo ...`): `repo ingest-hf <id> [--type dataset] [--allow GLOB]`, `ingest-civitai`, `ingest-local`, `list`, `verify`, `gc`.
 
-## Not here (yet)
+## Not supported
 
-Uploading your own models and datasets (`hf upload`, drag-and-drop) is next; transparent pull-through caching is not planned. Spaces never.
+Branches, pull requests and private repositories (an upload is one new revision of `main`); resumable uploads of one huge file (one PUT per file); transparent pull-through caching; Spaces never. Details: `docs/API_COMPATIBILITY.md`.
 
 ## Map
 

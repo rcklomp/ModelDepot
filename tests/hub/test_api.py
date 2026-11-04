@@ -124,3 +124,47 @@ def test_the_gui_page_and_its_assets_are_served(hub):
     import httpx
     r = httpx.get(live.url + "/")
     assert r.status_code == 200 and "text/html" in r.headers["content-type"]
+
+
+def test_an_integrity_check_is_not_counted_as_a_download(hub):
+    live, api = hub
+    stage_repo(live.repo)
+    jid = api.post("/api/hub/ops/verify", {}).json()["job"]["id"]
+    api.wait_job(jid)
+    s = api.get("/api/hub/jobs").json()["summary"]
+    assert s["running"] == 0 and s["queued"] == 0
+
+
+def test_read_only_mode_refuses_every_change_but_not_reading(make_live):
+    live = make_live(admin_token=ADMIN, read_only=True)
+    stage_repo(live.repo)
+    api = Api(live)
+    assert api.get("/api/hub/library").status_code == 200
+    for method, path in (("post", "/api/hub/ops/gc"), ("post", "/api/hub/repo/delete"), ("put", "/api/hub/settings")):
+        assert getattr(api, method)(path, {"id": "acme/tiny", "dry_run": True}).status_code == 403, path
+
+
+def test_the_gui_page_has_a_strict_content_security_policy_and_assets_revalidate(hub):
+    live, _ = hub
+    import httpx
+    page = httpx.get(live.url + "/")
+    csp = page.headers["content-security-policy"]
+    assert "script-src 'self'" in csp and "frame-ancestors 'none'" in csp and "connect-src 'self'" in csp
+    asset = httpx.get(live.url + "/ui/app.js")
+    assert asset.status_code == 200 and asset.headers["cache-control"] == "no-cache" and asset.headers["x-content-type-options"] == "nosniff"
+    again = httpx.get(live.url + "/ui/app.js", headers={"If-None-Match": asset.headers["etag"]})
+    assert again.status_code == 304
+
+
+def test_revisions_are_listed_newest_first_not_by_commit_id(hub):
+    live, api = hub
+    # commit ids chosen so that alphabetical order is the OPPOSITE of time order
+    stage_repo(live.repo, "acme/r", {"f": b"1"}, commit="f" * 40)
+    import time
+    time.sleep(1.1)
+    stage_repo(live.repo, "acme/r", {"f": b"2"}, commit="a" * 40)
+    live.repo.update_reference("acme/r", "main", "a" * 40)
+    d = api.get("/api/hub/repo", type="model", id="acme/r").json()
+    assert [r["commit"][0] for r in d["revisions"]] == ["a", "f"]          # same fetched_at: the later-written manifest is newer
+    s = api.get("/api/hub/status").json()
+    assert s["namespace"] and s["read_only"] is False

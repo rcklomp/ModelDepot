@@ -24,7 +24,7 @@ class Capabilities:
     tree: bool = True       # list files in a revision
     refs: bool = False      # expose branch/tag references
     commits: bool = False   # expose commit history
-    upload: bool = False    # accept uploads (v1 is read-only everywhere)
+    upload: bool = False    # accept uploads (the HF adapter does: server/adapters/hf_upload.py)
     search: bool = False    # search across repos
 
 

@@ -7,7 +7,7 @@ require to resolve and download a model or a dataset. Clients point at the mirro
     HF_ENDPOINT=https://mirror.lan
     HF_HUB_DISABLE_XET=1   # avoid the Xet chunk protocol
 
-Implemented routes (all GET; serving is read-only):
+Implemented routes (all GET unless noted; uploads are in hf_upload.py):
     GET  /api/models/{repo_id}                       -> model metadata
     GET  /api/models/{repo_id}/tree/{rev}/{path?}    -> file listing
     GET  /{repo_id}/resolve/{rev}/{filename}         -> blob (200/206 + HF headers)
@@ -117,7 +117,7 @@ class HfAdapter(ProtocolAdapter):
 
     @property
     def capabilities(self) -> Capabilities:
-        return Capabilities(resolve=True, tree=True, refs=True, commits=True)
+        return Capabilities(resolve=True, tree=True, refs=True, commits=True, upload=True)
 
     def mount(self, app: FastAPI) -> None:
         app.include_router(self._router())
@@ -157,7 +157,18 @@ class HfAdapter(ProtocolAdapter):
                 return await self._commits(cid(request), request.path_params["rev"])
 
             async def paths_info(request: Request):
-                return await self._paths_info(cid(request), request.path_params["rev"], await request.json())
+                # huggingface_hub posts this form-encoded (repeated `paths` keys); other callers send JSON
+                raw = (await request.body()).decode("utf-8", "replace")
+                if "json" in request.headers.get("content-type", ""):
+                    import json as _json
+                    try:
+                        body = _json.loads(raw or "{}")
+                    except ValueError:
+                        raise HTTPException(status_code=400, detail="invalid JSON body")
+                else:
+                    from urllib.parse import parse_qs
+                    body = {"paths": parse_qs(raw).get("paths", [])}
+                return await self._paths_info(cid(request), request.path_params["rev"], body)
 
             router.add_api_route(f"{api}/{seg}/revision/{{rev}}", revision, methods=["GET"])
             router.add_api_route(f"{api}/{seg}/tree/{{rev}}", tree, methods=["GET"])
@@ -190,9 +201,13 @@ class HfAdapter(ProtocolAdapter):
         except RepositoryNotFound:
             if self._wanted is not None:
                 self._wanted.note(kind, public, request.headers.get("user-agent", ""))
-            raise HTTPException(status_code=404, detail=f"{kind} {public} not found")
+            # X-Error-Code is how huggingface_hub tells "no such repo" (repo_exists() -> False) from any other 404.
+            raise HTTPException(status_code=404, detail=f"{kind} {public} not found", headers={"X-Error-Code": "RepoNotFound"})
         except RevisionNotFound:
-            raise HTTPException(status_code=404, detail=f"revision {revision_param!r} not found")
+            if self._is_empty(repo_id, revision_param):          # created for an upload, nothing committed yet: it exists
+                return JSONResponse(content=self._empty_info(kind, repo_id, public))
+            raise HTTPException(status_code=404, detail=f"revision {revision_param!r} not found",
+                                headers={"X-Error-Code": "RevisionNotFound"})
 
         try:
             manifest = self._repo.get_manifest(repo_id, commit)
@@ -217,6 +232,24 @@ class HfAdapter(ProtocolAdapter):
             body.update({"modelId": public, "spaces": [], "paperArxivId": None})
         return JSONResponse(content=body)
 
+    def _is_empty(self, repo_id: str, rev: str) -> bool:
+        """A repository that exists (created by an upload client) but has no commit yet; only 'main' names its (future) head."""
+        return rev == "main" and self._repo.repository_exists(repo_id) and not self._repo.list_revisions(repo_id)
+
+    def _empty_info(self, kind: str, repo_id: str, public: str) -> dict:
+        from datetime import datetime, timezone
+        try:
+            mtime = self._repo._storage.revisions_dir(repo_id).stat().st_mtime
+        except OSError:
+            mtime = 0
+        when = _hf_datetime(datetime.fromtimestamp(mtime, timezone.utc).isoformat())
+        body = {"id": public, "author": public.split("/", 1)[0] if "/" in public else "", "sha": None, "lastModified": when,
+                "private": False, "gated": False, "disabled": False, "tags": [], "downloads": 0, "likes": 0, "siblings": [],
+                "createdAt": when}
+        if kind == "model":
+            body.update({"modelId": public, "spaces": [], "paperArxivId": None})
+        return body
+
     async def _tree(self, repo_id: str, rev: str, file_path: str, request: Request) -> JSONResponse:
         """The Hub's tree listing. Without ?recursive the direct children of `file_path` (files and sub-folders); with
         ?recursive=true EVERY file below it (plus the folders on the way). Paths are always repo-relative. huggingface_hub's
@@ -227,6 +260,8 @@ class HfAdapter(ProtocolAdapter):
         except RepositoryNotFound:
             raise HTTPException(status_code=404, detail=f"repository {public_repo_id(repo_id)} not found")
         except RevisionNotFound:
+            if self._is_empty(repo_id, rev) and not file_path.strip("/"):
+                return JSONResponse(content=[])
             raise HTTPException(status_code=404, detail=f"revision {rev!r} not found")
 
         recursive = request.query_params.get("recursive", "").lower() in ("1", "true", "yes")
@@ -277,6 +312,8 @@ class HfAdapter(ProtocolAdapter):
             commit = self._repo.resolve_ref(repo_id, rev)
             manifest = self._repo.get_manifest(repo_id, rev)
         except (RepositoryNotFound, RevisionNotFound) as exc:
+            if self._is_empty(repo_id, rev):
+                return JSONResponse(content=[])
             raise HTTPException(status_code=404, detail=str(exc))
         return JSONResponse(content=[
             {
@@ -293,6 +330,8 @@ class HfAdapter(ProtocolAdapter):
         try:
             files = self._repo.list_files(repo_id, rev)
         except (RepositoryNotFound, RevisionNotFound) as exc:
+            if self._is_empty(repo_id, rev):
+                return JSONResponse(content=[])
             raise HTTPException(status_code=404, detail=str(exc))
         by_path = {f.path: f for f in files}
         out = []

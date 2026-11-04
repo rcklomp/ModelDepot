@@ -120,8 +120,8 @@ def describe_tree(kind: str, entries: list[dict]) -> dict:
             groups.append({"key": "folders", "title": "Folders", "exclusive": False, "options": opts})
 
     quick = [_opt("all", "Everything", entries, "Every file in the repository"),
-             _opt("config_only", "Config & tokenizer only", extras,
-                  "Not a complete model: the small files, no weights")]
+             _opt("config_only", "Config & tokenizer only" if kind == "model" else "README and small files only", extras,
+                  "Not a complete model: the small files, no weights" if kind == "model" else "Not the dataset: only the small text files")]
     return {"groups": groups, "quick": quick, "extras": _opt("extras", "README, config and tokenizer files", extras),
             "files": entries, "total_size": _size(entries), "file_count": len(entries)}
 
@@ -136,6 +136,8 @@ def _hf_api(token: str):
 def _wrap(exc: Exception) -> UpstreamError:
     name = type(exc).__name__
     status = getattr(getattr(exc, "response", None), "status_code", None) or 502
+    if status == 401:
+        return UpstreamError("Hugging Face rejected the token (Settings): check or clear it.", 502)
     if "Gated" in name:
         return UpstreamError("This repository is gated: it needs a Hugging Face token whose account has been approved (Settings).", 403)
     if "NotFound" in name:
@@ -194,7 +196,8 @@ def _civitai_get(path: str, params: dict | None, token: str):
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
-        raise UpstreamError(f"Civitai answered HTTP {e.code}", e.code if e.code in (401, 403, 404) else 502) from e
+        msg = "Civitai rejected the API key (Settings)" if e.code == 401 else f"Civitai answered HTTP {e.code}"
+        raise UpstreamError(msg, 403 if e.code == 403 else 404 if e.code == 404 else 502) from e
     except (urllib.error.URLError, TimeoutError, ValueError) as e:
         raise UpstreamError(f"Civitai is not reachable ({e})") from e
 

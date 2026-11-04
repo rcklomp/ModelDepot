@@ -7,12 +7,12 @@ URL-based or local-file paths.
 Set these once (in `~/.bashrc`, `~/.zshrc`, or per-shell):
 
 ```bash
-export HF_ENDPOINT=http://<mirror-host>:<port>     # e.g. http://synology:8000
+export HF_ENDPOINT=http://<mirror-host>:<port>     # e.g. http://synology:8090
 export HF_HUB_DISABLE_XET=1                         # avoid the Xet chunk protocol
 ```
 
 > Replace `<mirror-host>:<port>` with your mirror's address (the hostname or IP
-> of the NAS/mini PC, port 8000 by default, or 443 if fronted by DSM's
+> of the NAS/mini PC, port 8090 by default, or 443 if fronted by DSM's
 > reverse proxy with TLS — in which case use `https://`).
 
 ---
@@ -39,7 +39,7 @@ pipe = StableDiffusionPipeline.from_pretrained("runwayml/stable-diffusion-v1-5")
 ### vLLM
 
 ```bash
-export HF_ENDPOINT=http://synology:8000
+export HF_ENDPOINT=http://synology:8090
 export HF_HUB_DISABLE_XET=1
 vllm serve mistralai/Mistral-7B-Instruct-v0.2 --port 8001
 ```
@@ -50,7 +50,7 @@ honors `HF_ENDPOINT`.
 ### TGI (Text Generation Inference)
 
 ```bash
-export HF_ENDPOINT=http://synology:8000
+export HF_ENDPOINT=http://synology:8090
 export HF_HUB_DISABLE_XET=1
 docker run --gpus all -p 8080:80 \
   -e HF_ENDPOINT=$HF_ENDPOINT -e HF_HUB_DISABLE_XET=1 \
@@ -61,7 +61,7 @@ docker run --gpus all -p 8080:80 \
 ### MLX (Apple Silicon)
 
 ```bash
-export HF_ENDPOINT=http://synology:8000
+export HF_ENDPOINT=http://synology:8090
 export HF_HUB_DISABLE_XET=1
 python -m mlx_lm.generate --model mlx-community/Llama-3.2-1B-Instruct-4bit \
   --prompt "hello"
@@ -72,7 +72,7 @@ python -m mlx_lm.generate --model mlx-community/Llama-3.2-1B-Instruct-4bit \
 ### huggingface_hub CLI
 
 ```bash
-export HF_ENDPOINT=http://synology:8000
+export HF_ENDPOINT=http://synology:8090
 export HF_HUB_DISABLE_XET=1
 hf download mistralai/Mistral-7B-Instruct-v0.2 \
   --local-dir ./mistral
@@ -86,7 +86,7 @@ Ollama pulls GGUFs from Hugging Face via the `hf.co/<user>/<repo>:<file>` form,
 and **honors `HF_ENDPOINT`** for that resolution:
 
 ```bash
-export HF_ENDPOINT=http://synology:8000
+export HF_ENDPOINT=http://synology:8090
 export HF_HUB_DISABLE_XET=1
 ollama pull hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF:Q4_K_M
 ollama run hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF:Q4_K_M
@@ -97,7 +97,7 @@ The `:<quantization>` selects the GGUF file within the repo. For airgapped use
 
 ```bash
 # Download the GGUF from the mirror directly, then create from the local path:
-curl -O http://synology:8000/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf
+curl -O http://synology:8090/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf
 ollama create myllama -f - <<EOF
 FROM ./Llama-3.2-1B-Instruct-Q4_K_M.gguf
 EOF
@@ -112,10 +112,10 @@ mirror's `/resolve/` endpoint:
 
 ```bash
 # Download the GGUF from the mirror at startup:
-./llama-server --model-url http://synology:8000/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf
+./llama-server --model-url http://synology:8090/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf
 
 # Or load a file you already pulled:
-curl -O http://synology:8000/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf
+curl -O http://synology:8090/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf
 ./llama-server -m ./Llama-3.2-1B-Instruct-Q4_K_M.gguf
 ```
 
@@ -132,7 +132,7 @@ import it into LM Studio.
 
 ```bash
 # Pull the GGUF from the mirror:
-curl -O http://synology:8000/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf
+curl -O http://synology:8090/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf
 ```
 
 Then in LM Studio: **folder icon → My Models → Import** (point at the downloaded
@@ -148,14 +148,14 @@ Quick smoke test from any client machine:
 
 ```bash
 # 1. Metadata endpoint:
-curl -s http://synology:8000/api/models/mistralai/Mistral-7B-Instruct-v0.2 | jq .sha
+curl -s http://synology:8090/api/models/mistralai/Mistral-7B-Instruct-v0.2 | jq .sha
 
 # 2. Resolve a small file and check the three HF headers are present:
-curl -sI http://synology:8000/mistralai/Mistral-7B-Instruct-v0.2/resolve/main/config.json \
+curl -sI http://synology:8090/mistralai/Mistral-7B-Instruct-v0.2/resolve/main/config.json \
   | grep -iE 'X-Repo-Commit|ETag|Content-Length'
 
 # 3. Full client flow (transformers):
-HF_ENDPOINT=http://synology:8000 HF_HUB_DISABLE_XET=1 \
+HF_ENDPOINT=http://synology:8090 HF_HUB_DISABLE_XET=1 \
   python -c "from transformers import AutoConfig; print(AutoConfig.from_pretrained('mistralai/Mistral-7B-Instruct-v0.2').model_type)"
 ```
 
@@ -183,6 +183,28 @@ export HF_TOKEN=<the token>          # huggingface_hub sends it as "Authorizatio
 ```
 
 `curl` and llama.cpp's `--model-url` need the header too: `curl -H "Authorization: Bearer <token>" ...`.
+
+## Publishing your own models and datasets
+
+The same client publishes to this server. Publishing needs the **admin token** (`MIRROR_ADMIN_TOKEN`, or the file `<data folder>/config/admin-token`);
+the read token (`MIRROR_AUTH_TOKEN`) can only download.
+
+```bash
+export HF_ENDPOINT=http://<mirror-host>:<port>
+export HF_HUB_DISABLE_XET=1                  # required: Xet upload is not implemented
+export HF_TOKEN=<the admin token>
+```
+```python
+from huggingface_hub import HfApi
+api = HfApi()
+api.create_repo("lab/my-model", exist_ok=True)                       # repo_type="dataset" for a dataset; no organisation = the server's namespace
+api.upload_folder(folder_path="./my-model", repo_id="lab/my-model")  # large files go through LFS automatically
+api.upload_file(path_or_fileobj="notes.md", path_in_repo="notes.md", repo_id="lab/my-model")
+# or: hf upload lab/my-model ./my-model        hf upload lab/my-data ./train.jsonl data/train.jsonl --repo-type dataset
+```
+
+Each upload is one new revision of `main`; earlier revisions stay downloadable by their commit id. No branches or pull requests, no private repos
+(`MIRROR_AUTH_TOKEN` makes the whole mirror private). The namespace a bare name gets is `MIRROR_NAMESPACE` (default `local`). Details: `API_COMPATIBILITY.md`, "Uploading".
 
 ## A model is not there
 

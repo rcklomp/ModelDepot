@@ -51,6 +51,9 @@ class Settings:
     # Token for the GUI's admin API (download, delete, GC). Empty: the server makes one and keeps it in <root>/admin-token.
     admin_token: str = ""
 
+    # Namespace (the "user" part of `namespace/name`) a client's repos get when it names none, and what whoami-v2 reports. Uploads only.
+    namespace: str = "local"
+
     @property
     def blobs_dir(self) -> Path:
         return self.mirror_root / "blobs" / "sha256"
@@ -136,6 +139,7 @@ def load_settings() -> Settings:
         auth_token=_env("MIRROR_AUTH_TOKEN", ""),
         index_backend=_env("MIRROR_INDEX_BACKEND", "sqlite"),
         admin_token=_env("MIRROR_ADMIN_TOKEN", ""),
+        namespace=_env("MIRROR_NAMESPACE", "local").strip().strip("/") or "local",
     )
 
 

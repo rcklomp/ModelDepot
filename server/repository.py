@@ -183,6 +183,28 @@ class RepositoryCore:
         """Emit RepositoryCreated. Idempotent marker that a repo now exists."""
         self._events.emit(events.REPOSITORY_CREATED, repo_id=repo_id)
 
+    def repository_exists(self, repo_id: str) -> bool:
+        """True for any repo the store lists, including an empty one (created for an upload, no revision yet)."""
+        d = self._storage.repo_dir(repo_id)
+        return (d / "revisions").is_dir() or (d / "refs.json").is_file()
+
+    def create_repository(self, repo_id: str) -> bool:
+        """Create an EMPTY repository (no revision, no ref): what an upload client's `create_repo` asks for.
+
+        False when it already exists. Holds the store lock shared, so it cannot interleave with a repository delete."""
+        from .fsutil import fsync_dir
+        with self.ingest_lock():
+            if self.repository_exists(repo_id):
+                return False
+            rev_dir = self._storage.revisions_dir(repo_id)
+            try:
+                rev_dir.mkdir(parents=True, exist_ok=False)
+            except FileExistsError:                      # another create won the race
+                return False
+            fsync_dir(rev_dir.parent)
+            self.repository_created(repo_id)
+            return True
+
     # ---- locks ---------------------------------------------------------
 
     def ingest_lock(self):

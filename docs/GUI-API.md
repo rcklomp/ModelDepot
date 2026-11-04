@@ -8,7 +8,7 @@ Errors are `{"detail": "<a sentence meant for the user>"}` with 400 (bad request
 
 | endpoint | purpose |
 |---|---|
-| `GET /status` | `store_id, store_path, free_bytes, total_bytes, stored{blobs,bytes}, models, datasets, queue{running,queued,speed_bps}, hf_token_set, read_token_required, version` |
+| `GET /status` | `store_id, store_path, free_bytes, total_bytes, stored{blobs,bytes}, models, datasets, queue{running,queued,speed_bps,checks_running} (downloads only; integrity checks are counted apart), hf_token_set, read_token_required, namespace (the organisation a bare upload name gets), read_only, version` |
 | `GET /library?type=all\|model\|dataset&q=&sort=name\|size\|updated` | `{items:[{id, type, core_id, commit, files, size_bytes, revisions, updated, source, source_ref, license, formats[]}]}` (`id` is what a client calls it, `org/name`) |
 | `GET /repo?type=&id=` | one item plus `refs{}`, `revisions:[{commit, fetched_at, files:[{path,size,sha256}]}]` (newest first), `readme` (text or null) |
 | `GET /repo/delete-preview?type=&id=` | `{frees_bytes, shared_bytes}`: bytes only this repo holds / bytes other repos also use |
@@ -25,3 +25,16 @@ Errors are `{"detail": "<a sentence meant for the user>"}` with 400 (bad request
 
 **Job**: `{id, kind:"download"\|"verify", label, status: queued\|running\|paused\|done\|failed, phase: resolving\|downloading\|storing\|hashing, created, started, finished,
 bytes_total, bytes_done, speed_bps, eta_s, files_total, files_done, message, note, result, log[], spec}`. A queued job's `note` says why it waits (download window, another download).
+
+## Web upload (`/api/hub/upload/...`, all admin)
+
+For the browser's upload screen. Files are uploaded one request each into a **session** (a name the client makes up: 1-64 letters, digits, `-`, `_`), then the
+session is published as ONE new revision of `main`. `MIRROR_READ_ONLY` makes all three answer 403. Errors are `{"detail": ...}` as everywhere in `/api/hub`.
+
+| endpoint | purpose |
+|---|---|
+| `PUT /upload/file?type=model\|dataset&id=org/name&path=dir/file.ext&session=<name>` (admin) | the request body IS the file (send the `File` object itself); streamed to disk, never held in memory, no size limit. `{path, size}`. The same `path` again replaces the file. `id` without a `/` gets the server's namespace (`MIRROR_NAMESPACE`). The repository need not exist yet. 400: bad `path` (absolute, `..`, `.`, empty segment, backslash, control character, **any segment starting with `.`**) or bad `type`/`id`/`session`; 409: the session already holds files for another repository, or `path` collides with another file as a file/folder |
+| `POST /upload/commit` `{type, id, session, summary?, replace?}` (admin) | creates the repository if it is new, then publishes every file of the session as one new revision: the current files plus the session's (same path = overwritten). `replace:true` makes the session the whole new content (files not in it are removed). A session that changes nothing publishes nothing. Removes the session on success. `{id, type, commit, created, files}` (`created:false` = nothing changed, `commit` is the head). 404: unknown/finished session; 400: empty session; 409: the session belongs to another repository |
+| `POST /upload/discard` `{session}` (admin) | deletes the session's files; always `{ok:true}` |
+
+A browser folder pick should skip dot-files (`.DS_Store`, `.git/`): they are refused. Uploaded sessions nobody commits or discards are swept after 7 days.

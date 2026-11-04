@@ -15,9 +15,11 @@ from fastapi.staticfiles import StaticFiles
 
 from . import events
 from .adapters.hf_adapter import HfAdapter
+from .adapters.hf_upload import HfUploadAdapter
 from .auth import ReadTokenGate
 from .config import Settings, settings
 from .hub import api as hub_api
+from .hub import upload as hub_upload
 from .hub.jobs import JobManager
 from .hub.library import StoreUsage
 from .hub.state import HubSettings, WantedLog, load_admin_token
@@ -26,6 +28,20 @@ from .repository import RepositoryCore
 from .storage import FilesystemStorage, InvalidRepoId
 
 UI_DIR = Path(__file__).parent / "ui"
+
+# The GUI loads only its own files and talks only to this server; nothing from the network may run as script.
+_CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; "
+        "frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
+
+
+class _UiFiles(StaticFiles):
+    """The GUI's static files: revalidated on every load (ETag -> 304), so an update shows up at once and a reload is cheap."""
+
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        resp.headers["Cache-Control"] = "no-cache"
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        return resp
 
 
 @dataclass
@@ -73,8 +89,10 @@ def create_app(settings_override: "Settings | None" = None,
 
     HfAdapter(repo, wanted=ctx.wanted).mount(app)
     app.include_router(hub_api.create_router(ctx))
+    app.include_router(hub_upload.create_router(ctx))          # the GUI's web upload: /api/hub/upload/*
+    HfUploadAdapter(ctx).mount(app)                            # create_repo / upload_file / upload_folder / hf upload
     if active_settings.auth_token:
-        app.add_middleware(ReadTokenGate, token=active_settings.auth_token)
+        app.add_middleware(ReadTokenGate, token=active_settings.auth_token, admin_token=ctx.admin_token)
 
     @app.exception_handler(InvalidRepoId)
     async def invalid_repo_id(request, exc):
@@ -90,9 +108,11 @@ def create_app(settings_override: "Settings | None" = None,
     if UI_DIR.is_dir():
         @app.get("/", include_in_schema=False)
         async def ui_index():
-            return FileResponse(UI_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+            return FileResponse(UI_DIR / "index.html", headers={
+                "Cache-Control": "no-cache", "Content-Security-Policy": _CSP, "X-Content-Type-Options": "nosniff",
+                "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY"})
 
-        app.mount("/ui", StaticFiles(directory=str(UI_DIR)), name="ui")
+        app.mount("/ui", _UiFiles(directory=str(UI_DIR)), name="ui")
 
     return app
 
