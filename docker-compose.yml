@@ -1,45 +1,24 @@
-# Primary deployment: Caddy (TLS/HTTP2/compression/Range) -> FastAPI shim.
-# Usage:
-#   docker compose up
-# Then point clients at:  HF_ENDPOINT=https://mirror.lan  HF_HUB_DISABLE_XET=1
-#
-# The mirror store is a bind-mounted directory — move it to a NAS/SSD by
-# changing MIRROR_ROOT on the host; the container is stateless.
-
+# The whole application is ONE container on ONE port.
+#   cp .env.example .env      # set DATA_DIR to a folder on the NAS volume, e.g. /volume1/docker/llm-repo
+#   docker compose up -d --build
+# then open http://<nas>:8000 in a browser.
 services:
-  shim:
+  llm-repo:
     build: .
     image: llm-repo:latest
+    container_name: llm-repo
     restart: unless-stopped
-    environment:
-      MIRROR_ROOT: /data/mirror-root
-      MIRROR_BASE_URL: https://${MIRROR_HOST:-mirror.lan}
-      MIRROR_PUBLIC_URL: https://${MIRROR_HOST:-mirror.lan}
-      MIRROR_READ_ONLY: ${MIRROR_READ_ONLY:-0}
-      MIRROR_AUTH_TOKEN: ${MIRROR_AUTH_TOKEN:-}
-      MIRROR_INDEX_BACKEND: ${MIRROR_INDEX_BACKEND:-sqlite}
-    volumes:
-      - ${MIRROR_ROOT:-./data/mirror-root}:/data/mirror-root
-    # Internal only; Caddy fronts it.
-    expose:
-      - "8000"
-
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    depends_on:
-      - shim
     ports:
-      - "80:80"
-      - "443:443"
+      - "${PORT:-8000}:8000"
     environment:
-      MIRROR_HOST: ${MIRROR_HOST:-mirror.lan}
-      SHIM_UPSTREAM: shim:8000
+      TZ: ${TZ:-Europe/Amsterdam}                 # the GUI's download window is local time
+      MIRROR_AUTH_TOKEN: ${MIRROR_AUTH_TOKEN:-}   # optional: clients must send it (HF_TOKEN) to download
+      MIRROR_ADMIN_TOKEN: ${MIRROR_ADMIN_TOKEN:-} # optional: otherwise made on first start, kept in the data folder
+      MIRROR_HF_TOKEN: ${MIRROR_HF_TOKEN:-}       # optional: your Hugging Face token (can also be set in the GUI)
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-
-volumes:
-  caddy_data:
-  caddy_config:
+      - ${DATA_DIR:-./data}:/data                 # the store, the queue and the settings: everything worth keeping
+    # On Synology, files in DATA_DIR belong to a NAS user. Run as that user instead of root (find the numbers with `id <user>`):
+    # user: "${PUID:-0}:${PGID:-0}"
+    # If the container logs "Operation not permitted" on an old DSM (a seccomp profile that predates this image's glibc), uncomment:
+    # security_opt:
+    #   - seccomp:unconfined

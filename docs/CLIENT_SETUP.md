@@ -12,7 +12,7 @@ export HF_HUB_DISABLE_XET=1                         # avoid the Xet chunk protoc
 ```
 
 > Replace `<mirror-host>:<port>` with your mirror's address (the hostname or IP
-> of the NAS/mini PC, port 8000 by default, or 443 if fronted by Caddy/DSM
+> of the NAS/mini PC, port 8000 by default, or 443 if fronted by DSM's
 > reverse proxy with TLS — in which case use `https://`).
 
 ---
@@ -74,7 +74,7 @@ python -m mlx_lm.generate --model mlx-community/Llama-3.2-1B-Instruct-4bit \
 ```bash
 export HF_ENDPOINT=http://synology:8000
 export HF_HUB_DISABLE_XET=1
-huggingface-cli download mistralai/Mistral-7B-Instruct-v0.2 \
+hf download mistralai/Mistral-7B-Instruct-v0.2 \
   --local-dir ./mistral
 ```
 
@@ -161,3 +161,29 @@ HF_ENDPOINT=http://synology:8000 HF_HUB_DISABLE_XET=1 \
 
 If step 3 prints `mistral`, the mirror is serving correctly and the engine is
 consuming it.
+
+---
+
+## Datasets
+
+The same two variables. A dataset is addressed like on the Hub:
+
+```bash
+hf download HuggingFaceH4/ultrachat_200k --repo-type dataset
+```
+```python
+from datasets import load_dataset
+ds = load_dataset("HuggingFaceH4/ultrachat_200k")       # resolves through HF_ENDPOINT
+```
+
+## When the server has a token (`MIRROR_AUTH_TOKEN`)
+
+```bash
+export HF_TOKEN=<the token>          # huggingface_hub sends it as "Authorization: Bearer ..."
+```
+
+`curl` and llama.cpp's `--model-url` need the header too: `curl -H "Authorization: Bearer <token>" ...`.
+
+## A model is not there
+
+The server answers 404 and remembers the request: open the GUI, the Library shows it under "Wanted" with a Download button.

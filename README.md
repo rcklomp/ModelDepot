@@ -1,74 +1,56 @@
-# LLM Repository
+# LLM Repository (working name)
 
-A general-purpose **local AI artifact repository** with a Hugging Face
-compatibility adapter. Inference engines on your LAN treat it as
-`huggingface.co` by setting one environment variable:
+Your own **Hugging Face for the LAN**: a repository for AI **models and datasets** that runs in one Docker container on a NAS, with a browser GUI.
+Machines on your network point `HF_ENDPOINT` at it, and `hf download`, `transformers`, `datasets`, vLLM, mlx_lm, llama.cpp and Ollama fetch from it as if it were
+huggingface.co. (No Spaces: they are apps, not files.)
 
 ```bash
-export HF_ENDPOINT=https://mirror.lan
-export HF_HUB_DISABLE_XET=1     # avoid the proprietary Xet chunk protocol
+export HF_ENDPOINT=http://<nas>:8000
+export HF_HUB_DISABLE_XET=1
+hf download Qwen/Qwen3-0.6B
 ```
 
 ## Why
 
-Censorship / takedown resilience. If Hugging Face is geo-blocked,
-rate-limited, or taken down, your machines keep working because they already
-pulled what they need and resolve against your mirror. Storage is plain files
-on storage you own (external SSD, NAS share) — portable via rsync.
+- Download a model **once** for the whole household instead of once per machine.
+- If Hugging Face is blocked, rate-limited or a model is taken down, what you already stored keeps working.
+- Plain files on storage you own (a NAS volume): back it up or move it with `rsync`.
 
-This is **not** only a Hugging Face mirror. It is an artifact repository with an HF
-adapter, for models and datasets. The storage layer has no knowledge of Hugging Face; HF is the first
-protocol adapter. Civitai, Ollama, OCI, and filesystem adapters follow without
-touching storage.
+## What you get
 
-## Core principles
+- **A browser GUI** on the same port: browse the library, read a model's README and files, search Hugging Face and Civitai, pick exactly the quant or files you want (with sizes),
+  watch downloads with progress, pause and resume, see and free disk space, and copy ready-made connection lines for any machine.
+- **A download queue that is safe for big files:** one at a time, optional night-time window, resumes after a drop or a restart, refuses what will not fit, checks every file's sha256.
+- **"Wanted":** when a machine asks for a model the library lacks, it shows up with a one-click Download.
+- **Models and datasets**, including the legacy short names (`gpt2`, `squad`). Tested with the real `huggingface_hub`, `hf download --repo-type dataset` and `datasets.load_dataset`.
+- **Safe by construction:** blobs are stored by sha256 and never change; garbage collection and delete can never remove the files of a running download; writes are fsync'd.
 
-- Storage is the source of truth.
-- Blobs are immutable. Revisions are immutable. References are mutable.
-- Protocol adapters are disposable.
-- Every operation is crash-safe.
-- All derived state is rebuildable.
-- Plain files are preferred over databases.
+## Run it (Synology DS713+ or any Docker host)
 
-## Status
+```bash
+cp .env.example .env        # set DATA_DIR to a folder on the NAS volume
+docker compose up -d --build
+```
 
-A standalone application for a NAS (it has nothing to do with any inference engine or GPU rig; those are just clients).
-Today: the Hugging Face routes for models and datasets (`hf download`, `snapshot_download`, `datasets.load_dataset` work against it), an ingester (`repo ingest-hf`, `ingest-civitai`, `ingest-local`) and integrity / GC jobs, all from the command line.
-Being built, in this order: a browser GUI served by the same process, one Docker image
-for the Synology DS713+, then uploading your own models and datasets. The old rig console that used to live here is `tools/hot-expert/rig_console/` in
-the colibri repository (the tag `archive/rig-console` keeps the last version of this repository that carried it).
+Open `http://<nas>:8000`. The first admin action asks for the admin token the server made (`DATA_DIR/config/admin-token`). Full walkthrough, backup and
+troubleshooting: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). Not yet tested on the DS713+ itself (an old kernel and Docker): the image builds for `linux/amd64` and passes its checks elsewhere.
 
-## Quick start (dev)
+## Develop
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[test]"
-pytest                              # unit + contract tests
-uvicorn server.main:app --reload    # serve the shim
+pytest                                   # unit, contract, real-client compatibility and GUI-API tests
+MIRROR_ROOT=./data uvicorn server.main:app --reload
 ```
 
-## Quick start (Docker, primary deployment)
+Command line (inside the container: `docker exec llm-repo repo ...`): `repo ingest-hf <id> [--type dataset] [--allow GLOB]`, `ingest-civitai`, `ingest-local`, `list`, `verify`, `gc`.
 
-```bash
-cp .env.example .env               # set MIRROR_ROOT, MIRROR_HOST
-docker compose up -d
-```
+## Not here (yet)
 
-## Quick start (Synology DS713+, no Docker)
+Uploading your own models and datasets (`hf upload`, drag-and-drop) is next; transparent pull-through caching is not planned. Spaces never.
 
-```bash
-./scripts/run-on-synology.sh
-```
+## Map
 
-## Layout
-
-```
-server/      HTTP shim (FastAPI): config, storage, blobstore, repository core,
-             manifests, refs, events, index, adapters/
-ingester/    CLI + transactional ingest (HF first, Civitai later) + jobs
-scripts/     deployment helpers (Synology, rsync replication)
-tests/       unit, contract (HF header contract), engines (real-client compat)
-docs/        DESIGN, API_COMPATIBILITY, FAILURE_MODES, PERFORMANCE, ...
-```
-
-See `docs/DESIGN.md` for the architectural rationale and trade-offs.
+`server/` the app (`adapters/hf_adapter.py` Hub routes, `hub/` the GUI's API, jobs and runner, `ui/` the GUI) - `ingester/` downloads and imports - `docs/` (start with
+`ARCHITECTURE.md`, `API_COMPATIBILITY.md`, `GUI-API.md`) - `tests/`. The rig's old model console lives in the colibri repository, not here.
