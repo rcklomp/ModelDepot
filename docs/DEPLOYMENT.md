@@ -72,6 +72,7 @@ A model that is not in the library gives a 404 and shows up in the GUI's **Wante
 - Downloads run **one at a time** (Settings: up to 4). Add a **download window** (for example `01:00-07:00`) to keep a big download off your daytime internet.
 - Pause keeps the partial files; Resume (or a restart of the container) continues where it stopped. Remove discards the partial download.
 - A download is refused up front when the volume cannot hold it.
+- **A single file over 50 GB works.** The Hugging Face client itself refuses to start one without Xet ("The file is too large to be downloaded using the regular download method ... Install `hf_xet`"); this application does not use Xet, so it lifts that limit and downloads by plain HTTP with resume. Do not install `hf_xet` in the image to get around the message: it is removed on purpose. If a repo failed with that message before 2026-11-05, update the image (section 5) and press Retry: the files that had arrived are kept.
 - Every file is checked against Hugging Face's sha256 where one is published, then stored by its own sha256 (identical files are stored once).
 
 ## 5. Updating, backing up, TLS

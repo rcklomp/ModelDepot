@@ -60,6 +60,20 @@ class HfSourceError(Exception):
     pass
 
 
+def _lift_size_guard() -> None:
+    """Let `huggingface_hub` download a file bigger than 50 GB over plain HTTP.
+
+    The client refuses to START such a file ("The file is too large to be downloaded using the regular download method ... Install hf_xet")
+    because it assumes a file that big can only come through the Xet backend. This application does not use Xet (it is switched off on
+    purpose: a Rust wheel on an old Atom CPU, and its own big cache on a 4 GB NAS), and the Hub does serve such a file by plain HTTP with Range
+    requests (checked 2026-11-05 on a 55 GB GGUF: 206 at the start, at 51 GB and at the last byte). A resumed download never meets the guard
+    (it only fires from byte 0); a first attempt does, and a repo with one 55 GB part failed there after the smaller parts had arrived.
+    """
+    from huggingface_hub import constants
+    if hasattr(constants, "MAX_HTTP_DOWNLOAD_SIZE"):       # older clients have no guard, and then nothing to lift
+        constants.MAX_HTTP_DOWNLOAD_SIZE = 1 << 60
+
+
 def fetch(repo_id: str, staging_dir: Path, *, revision: str = "main",
           repo_type: str = "model",
           token: str | None = None, allow_patterns: list[str] | None = None,
@@ -90,6 +104,7 @@ def fetch(repo_id: str, staging_dir: Path, *, revision: str = "main",
         RevisionNotFoundError,
     )
     api = HfApi(endpoint=endpoint)
+    _lift_size_guard()
 
     # 1. Pin the revision to a concrete commit hash (repo_info works for models and datasets on every huggingface_hub version).
     try:
