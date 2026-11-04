@@ -37,14 +37,15 @@ def make_settings(root: Path, **kw) -> Settings:
 
 
 def stage_repo(repo, repo_id: str = "acme/tiny", files: dict[str, bytes] | None = None, commit: str = COMMIT,
-               repo_type: str | None = None) -> str:
+               repo_type: str | None = None, etag: str | None = None) -> str:
+    """`etag` forces ONE recorded etag on every file (what an old `repo ingest-local` wrote), to test the server's repair."""
     from server.manifests import FileEntry, Manifest, RevisionInfo, Source, SCHEMA_VERSION
 
     entries = []
     for path, data in (files or FILES).items():
         blob = repo.put_blob_bytes(data)
         entries.append(FileEntry(path=path, size=len(data), blob=f"sha256:{blob.digest}", checksums={"sha256": blob.digest},
-                                 metadata={"hf": {"etag": f'"{blob.digest[:32]}-1"', "x_repo_commit": commit}}))
+                                 metadata={"hf": {"etag": etag or f'"{blob.digest[:32]}-1"', "x_repo_commit": commit}}))
     repo.publish_revision(Manifest(schema_version=SCHEMA_VERSION, repo_id=repo_id,
                                    source=Source(kind="local", ref="test"),
                                    revision=RevisionInfo(commit=commit, fetched_at="2026-11-04T10:00:00+00:00"), files=entries))

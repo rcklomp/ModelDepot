@@ -9,6 +9,20 @@ Tested on 2026-11-04: the image builds for `linux/amd64`, starts, passes its hea
 through the GUI's queue (Docker Desktop on a Mac, emulating amd64). **Not
 tested on the NAS itself** (a DS713+ has an old kernel and an old Docker): the first start there is the real test; see Troubleshooting.
 
+## 0. If an older version is already running on the NAS
+
+On 2026-11-04 the NAS was running version 0.1.0 of this application as a DSM package with its own Python (renamed ModelDepot by the owner's Hermes Agent), on
+**port 8010** (the Hugging Face API only: no GUI, no datasets, no uploads) and **port 8011** (the early "Rig Model Manager" console, which is not part of this
+application any more; it listed jobs and inventory on the LAN without a token). This version replaces both. To move over:
+
+1. Stop the package (both ports), then **copy its data folder** (`rsync -a --partial <old folder>/ /volume1/docker/modeldepot/`) and keep the old one until you have checked the new one.
+2. Set `DATA_DIR` in `.env` to the copy and start the container (section 1). If your machines already use `HF_ENDPOINT=http://<nas>:8010`, also set `PORT=8010` and nothing has to change on them.
+3. Everything in the old store shows up in the library. Checked on a store written by that version's code: no existing file was changed, and the real Hugging Face client
+   downloads every repo. New next to the old files: `.store-id`, `config/`, `jobs/`, `datasets/`.
+
+Repos that version imported with `repo ingest-local` gave **wrong files** to `snapshot_download` (every file of the repo came back with the same bytes, because they all
+carried one ETag). This version serves them correctly with no change to the store; clients that downloaded them earlier should delete their cached copy of those repos.
+
 ## 1. Get the code and the image onto the NAS
 
 Over ssh on the NAS (the NAS needs `git` and `docker compose`; if it lacks them use B):

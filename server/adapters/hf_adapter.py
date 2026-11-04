@@ -91,7 +91,10 @@ def _hf_compat_etag(file_meta: Any) -> str:
     _normalize_etag; we return a quoted hex string."""
     hf_meta = (file_meta.metadata or {}).get("hf", {}) if file_meta else {}
     etag = hf_meta.get("etag")
-    if etag:
+    # `local-<commit>` is what older `repo ingest-local` runs wrote for EVERY file of a repo. huggingface_hub names its
+    # cache blobs by ETag, so a repo whose files share one ETag comes back with every file holding the same bytes.
+    # Such a value is never echoed; the content-derived one below is used instead (no migration of old stores needed).
+    if etag and not str(etag).startswith("local-"):
         return etag
     # Synthesize: content-derived so identical content => identical etag.
     digest = file_meta.digest if file_meta else "0" * 64

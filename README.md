@@ -45,7 +45,7 @@ pytest                                   # unit, contract, real-client compatibi
 MIRROR_ROOT=./data uvicorn server.main:app --reload
 ```
 
-Command line (inside the container: `docker exec modeldepot repo ...`): `repo ingest-hf <id> [--type dataset] [--allow GLOB]`, `ingest-civitai`, `ingest-local`, `list`, `verify`, `gc`.
+Command line (inside the container: `docker exec modeldepot repo ...`): `repo ingest-hf <id> [--type dataset] [--allow GLOB]`, `ingest-civitai`, `ingest-local <id> <folder>` (copies; `--move` moves instead), `list`, `verify`, `gc`.
 
 ## Not supported
 

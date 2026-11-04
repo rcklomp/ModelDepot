@@ -142,6 +142,9 @@ def _build_parser() -> argparse.ArgumentParser:
     lc.add_argument("--exclude", action="append", default=None,
                     help="glob pattern to exclude (repeatable). "
                          "Default: common junk files (.DS_Store, .cache/, etc.)")
+    lc.add_argument("--move", action="store_true",
+                    help="MOVE the files into the store instead of copying them: fast and needs no extra disk space, "
+                         "but the source folder is emptied. Default: copy, the source is left untouched.")
     lc.set_defaults(func=_cmd_ingest_local)
 
     return p
@@ -213,7 +216,8 @@ def _cmd_ingest_local(args) -> int:
     already on disk — GGUF exports from LM Studio, manually downloaded models,
     safetensors, etc. Files are content-addressed (sha256) into the blob store
     just like HF ingests; the only difference is the source is a local path
-    instead of an HTTP download.
+    instead of an HTTP download. The source is COPIED (it may be the only copy of
+    the model, or another program's library); `--move` consumes it instead.
     """
     import fnmatch
     import uuid
@@ -272,22 +276,48 @@ def _cmd_ingest_local(args) -> int:
     for rel, f in all_files:
         print(f"    {f.stat().st_size / 1e6:8.1f} MB  {rel}")
 
-    # Build a StagedSnapshot. We use a synthetic commit (deterministic from the
-    # file list + sizes) so re-ingesting the same files is idempotent.
+    # Build a StagedSnapshot. The synthetic commit is deterministic from the file list, sizes and modification times,
+    # so re-ingesting the same files is idempotent and a CHANGED file becomes a new revision.
     import hashlib
-    commit_input = "|".join(f"{r}:{s}" for r, (s, _) in
-                            zip([r for r, _ in all_files], all_files))
+    import shutil
+    stats = [(rel, f.stat()) for rel, f in all_files]
+    commit_input = "|".join(f"{rel}:{st.st_size}:{st.st_mtime_ns}" for rel, st in stats)
     commit = hashlib.sha256(commit_input.encode()).hexdigest()[:40]
 
-    # StagedFile requires local_path to exist; we point directly at the source
-    # files (no copy needed — the transaction module reads + hashes them).
+    # Default: copy into a staging folder inside the store (the blob store then MOVES the copies into place).
+    # The source must survive: pointing the blob store straight at it emptied the user's folder.
+    staging = None
+    if args.move:
+        sources = {rel: f for rel, f in all_files}
+    else:
+        staging = storage.staging_dir / f"local-{uuid.uuid4().hex[:12]}"
+        free = shutil.disk_usage(storage.staging_dir).free
+        if total_size + (64 << 20) > free:
+            print(f"error: copying {total_size / 1e9:.2f} GB needs that much free space in the store's volume "
+                  f"({free / 1e9:.2f} GB free); use --move to move the files instead of copying them", file=sys.stderr)
+            return 1
+        staging.mkdir(parents=True)
+        sources = {}
+        print("  copying into the store's staging folder (use --move to skip the copy) ...")
+        try:
+            for rel, f in all_files:
+                dest = staging / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(f, dest)
+                sources[rel] = dest
+        except BaseException:
+            _rm_tree(staging)
+            raise
+
+    # No etag here: the transaction then records a content-derived one, unique per file. A shared etag (this used to
+    # write `local-<commit>` for EVERY file) makes huggingface_hub store all files of the repo under one cache blob.
     staged_files = []
-    for rel, f in all_files:
+    for rel, st in stats:
         staged_files.append(StagedFile(
             path=rel,
-            local_path=f,
-            size=f.stat().st_size,
-            etag=f'local-{commit[:16]}',   # synthetic, non-empty
+            local_path=sources[rel],
+            size=st.st_size,
+            etag="",
             sha256=None,                    # let transaction compute it
         ))
 
@@ -295,19 +325,23 @@ def _cmd_ingest_local(args) -> int:
         repo_id=core_repo_id(args.repo_type, args.repo_id),
         revision_requested="local",
         commit=commit,
-        staging_dir=src,
+        staging_dir=staging if staging is not None else src,
         files=staged_files,
     )
 
-    result = transaction.ingest(
-        repo, snapshot,
-        source_kind="local",
-        source_ref=f"file://{src}",
-        ref_name=args.ref,
-        license_name=args.license,
-        update_ref=not args.no_update_ref,
-        allow_incomplete_shards=args.allow_incomplete_shards,
-    )
+    try:
+        result = transaction.ingest(
+            repo, snapshot,
+            source_kind="local",
+            source_ref=f"file://{src}",
+            ref_name=args.ref,
+            license_name=args.license,
+            update_ref=not args.no_update_ref,
+            allow_incomplete_shards=args.allow_incomplete_shards,
+        )
+    finally:
+        if staging is not None:
+            _rm_tree(staging)
     print(f"\n  {'published' if result.published else 'already present'} "
           f"revision {result.commit} ({result.file_count} files)")
     if result.ref_updated:
