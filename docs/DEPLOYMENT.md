@@ -27,7 +27,7 @@ carried one ETag). This version serves them correctly with no change to the stor
 
 ## 1. Get the code and the image onto the NAS
 
-Over ssh on the NAS (the NAS needs `git` and `docker compose`; if it lacks them use B):
+Over ssh on the NAS (the NAS needs `git` and Docker Compose; if it lacks them use B). The DS713+ has only the older standalone **`docker-compose`** (v1, no `docker compose` plugin, checked 2026-11-04): where this document says `docker compose ...`, type `docker-compose ...` there; the files are the same and an override file is merged the same way:
 
 ```bash
 # A. build on the NAS
