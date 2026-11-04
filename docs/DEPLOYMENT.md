@@ -16,7 +16,9 @@ On 2026-11-04 the NAS was running version 0.1.0 of this application as a DSM pac
 application any more; it listed jobs and inventory on the LAN without a token). This version replaces both. To move over:
 
 1. Stop the package (both ports), then **copy its data folder** (`rsync -a --partial <old folder>/ /volume1/docker/modeldepot/`) and keep the old one until you have checked the new one.
-2. Set `DATA_DIR` in `.env` to the copy and start the container (section 1). If your machines already use `HF_ENDPOINT=http://<nas>:8010`, also set `PORT=8010` and nothing has to change on them.
+2. Set `DATA_DIR` in `.env` to the copy and start the container (section 1). **The address stays http://\<nas\>:8090** (README, `.env.example`, everything below). Only if
+   machines of yours really use `HF_ENDPOINT=http://<nas>:8010`, also publish the old port next to it, so nothing has to change on them: create `docker-compose.yml`'s sibling
+   `docker-compose.override.yml` with `services: { modeldepot: { ports: ["8010:8000"] } }` (Compose adds it to the 8090 mapping), then `docker compose up -d`. Do not replace 8090 by 8010.
 3. Everything in the old store shows up in the library. Checked on a store written by that version's code: no existing file was changed, and the real Hugging Face client
    downloads every repo. New next to the old files: `.store-id`, `config/`, `jobs/`, `datasets/`.
 
