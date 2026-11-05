@@ -73,7 +73,8 @@ function renderStatus(s, failed) {
     h('span', { class: 'sb grow' }),
     h('span', { class: 'sb' }, h('span', { class: 'sb-l' }, 'HF_ENDPOINT'), h('code', null, origin()), copyBtn(origin(), { label: 'Copy', title: 'Copy the server address' })),
     h('a', { class: 'sb ' + (s.hf_token_set ? '' : 'warn'), href: '#/settings', title: 'Hugging Face token (Settings)' }, icon('lock', 13),
-      s.hf_token_set ? 'HF token set' : 'no token: gated models locked'));
+      s.hf_token_set ? 'HF token set' : 'no token: gated models locked'),
+    ...(s.version ? [h('span', { class: 'sb', title: 'The version of ModelDepot that is running' }, h('span', { class: 'sb-l' }, 'Version'), s.version)] : []));
 }
 
 on('status', (e) => {

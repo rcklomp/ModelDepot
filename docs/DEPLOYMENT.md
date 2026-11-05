@@ -78,6 +78,7 @@ A model that is not in the library gives a 404 and shows up in the GUI's **Wante
 ## 5. Updating, backing up, TLS
 
 - **Update:** pull the new code, `docker compose up -d --build`. The data folder is untouched.
+- **Which version is running:** the footer of every GUI page says `Version x.y.z` (bottom right); the same number is in `GET /api/hub/status` and `/openapi.json` (`info.version`). After an update it must be the new one: an old number means the old image is still running.
 - **Back up / copy:** the data folder is plain files: `rsync -a --partial --inplace /volume1/docker/modeldepot/ other-nas:/volume1/docker/modeldepot/` (`scripts/rsync-to-target.sh` wraps this). Stop the container or avoid copying while a download is being stored.
 - **Integrity:** Storage -> "Check integrity" re-hashes every file and lists any that are damaged.
 - **TLS** (only if a tool insists on https): use DSM's reverse proxy (Control Panel -> Login Portal -> Advanced -> Reverse Proxy, `https://<nas>:443` -> `http://localhost:8090`).
