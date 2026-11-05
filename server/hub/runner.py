@@ -70,7 +70,7 @@ def run(spec: dict) -> int:
                                         ref_name="main", license_name=snap.license_name, progress=progress,
                                         allow_incomplete_shards=bool(spec.get("allow_incomplete_shards")))
         shutil.rmtree(staging, ignore_errors=True)
-        emit(phase="done", repo=result.repo_id, commit=result.commit, files=result.file_count, published=result.published)
+        emit(phase="done", repo=result.repo_id, commit=result.commit, files=result.file_count, published=result.published, added=result.added)
         return 0
     except Exception as exc:                          # noqa: BLE001 - the job record needs the message, whatever it was
         emit(phase="error", message=str(exc))

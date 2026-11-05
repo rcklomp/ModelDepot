@@ -1,7 +1,9 @@
 """Versioned, deterministic manifests.
 
-A manifest describes one immutable revision of a repository. It is written once
-(atomic publish) and never modified. The on-disk form is JSON with schema
+A manifest describes one revision of a repository. It is written atomically
+(temp file + rename). Once published, an entry never changes or goes away; the only
+later change is that files of the same commit that arrive afterwards are added
+(RepositoryCore.publish_or_extend). The on-disk form is JSON with schema
 versioning so it can evolve.
 
 Design rules enforced here:

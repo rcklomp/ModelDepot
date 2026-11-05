@@ -57,8 +57,12 @@ touch storage, manifests, or the repository core.
 - **Storage is the source of truth.** Blobs + manifests + refs define everything.
 - **Blobs are immutable.** The blob store contains only immutable blobs — no
   sidecar files, no metadata. Identical content is stored once (dedup).
-- **Revisions are immutable.** A published revision is never overwritten. To
-  update a model, publish a new revision and move a reference.
+- **A revision never changes what it holds.** A published revision is never
+  overwritten and none of its files changes or disappears. A revision names one
+  fixed commit, so files of that commit that arrive later (the same repository
+  pulled in parts) are ADDED to it (`RepositoryCore.publish_or_extend`, under one
+  lock per repository); a path whose content would differ is refused. To update a
+  model, publish a new revision and move a reference.
 - **References are mutable.** `refs.json` is the only live-pointer state.
 - **Protocol adapters are disposable.** If HF changes its API, only
   `hf_adapter.py` changes.

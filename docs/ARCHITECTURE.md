@@ -25,7 +25,7 @@ One Python process (FastAPI, one uvicorn worker) in one container. Download jobs
 <root>/events.jsonl                   append-only audit log      <root>/.store-id   identity of this store
 ```
 
-A repository's core id is `org/name` (models) or `datasets/org/name` (datasets). Principles: blobs and revisions are immutable, only refs move;
+A repository's core id is `org/name` (models) or `datasets/org/name` (datasets). Principles: blobs are immutable, a revision never changes what it holds (it only gains files of its own commit, see DESIGN.md), only refs move;
 derived state is rebuildable; every write that must survive a power cut is fsync'd (`server/fsutil.py`).
 
 ## Concurrency rule that matters

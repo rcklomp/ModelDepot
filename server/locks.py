@@ -34,3 +34,15 @@ def store_lock(root: Path, *, exclusive: bool, wait: bool):
         yield
     finally:
         os.close(fd)        # closing releases the lock
+
+
+@contextmanager
+def dir_lock(path: Path):
+    """Exclusive, waiting flock on a DIRECTORY (opened read-only): serialises the read-modify-write of one repository's
+    manifests across threads and processes without leaving a lock file in the store. Released when the descriptor closes."""
+    fd = os.open(str(path), os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)

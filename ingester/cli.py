@@ -190,7 +190,7 @@ def _cmd_ingest_hf(args) -> int:
             update_ref=not args.no_update_ref,
             allow_incomplete_shards=args.allow_incomplete_shards,
         )
-        print(f"  {'published' if result.published else 'already present'} "
+        print(f"  {_outcome(result)} "
               f"revision {result.commit} ({result.file_count} files)")
         if result.ref_updated:
             print(f"  {args.ref} -> {result.commit}")
@@ -342,13 +342,20 @@ def _cmd_ingest_local(args) -> int:
     finally:
         if staging is not None:
             _rm_tree(staging)
-    print(f"\n  {'published' if result.published else 'already present'} "
+    print(f"\n  {_outcome(result)} "
           f"revision {result.commit} ({result.file_count} files)")
     if result.ref_updated:
         print(f"  {args.ref} -> {result.commit}")
     print(f"  serve at: {'/datasets' if args.repo_type == 'dataset' else ''}/{args.repo_id}/resolve/{args.ref}/<file>")
     print("done.")
     return 0
+
+
+def _outcome(result) -> str:
+    """One word for what an ingest did: made the revision, added files to the one that existed, or found it all there."""
+    if result.published:
+        return "published"
+    return f"added {result.added} file(s) to the existing" if result.added else "already present"
 
 
 def _slug(s: str) -> str:
@@ -387,7 +394,7 @@ def _cmd_ingest_civitai(args) -> int:
             update_ref=not args.no_update_ref,
             allow_incomplete_shards=args.allow_incomplete_shards,
         )
-        print(f"  {'published' if result.published else 'already present'} "
+        print(f"  {_outcome(result)} "
               f"revision {result.commit} ({result.file_count} files)")
         if result.ref_updated:
             print(f"  {args.ref} -> {result.commit}")

@@ -32,6 +32,23 @@ def test_a_download_runs_to_done_and_the_repo_is_served(make_live, monkeypatch):
     assert api.get("/api/hub/wanted").json()["items"] == []
 
 
+def test_a_second_pick_of_the_same_repo_adds_its_files_to_the_library(make_live, monkeypatch):
+    """Issue #2: README.md first, then the weights of the same upstream commit. The second job used to end `done` with
+    nothing added (its blobs became orphans), so the file was missing in the Library."""
+    _, mine, api = _pair(make_live, monkeypatch)
+    first = api.wait_job(api.post("/api/hub/jobs", {"source": "hf", "id": "acme/tiny", "type": "model", "files": ["README.md"]}).json()["job"]["id"])
+    second = api.wait_job(api.post("/api/hub/jobs", {"source": "hf", "id": "acme/tiny", "type": "model", "files": ["model.safetensors"]}).json()["job"]["id"])
+    assert first["status"] == "done" and second["status"] == "done", (first, second)
+    assert first["result"]["commit"] == second["result"]["commit"] == COMMIT
+    d = api.get("/api/hub/repo", type="model", id="acme/tiny").json()
+    assert sorted(f["path"] for f in d["revisions"][0]["files"]) == ["README.md", "model.safetensors"]
+    assert len(d["revisions"]) == 1 and d["files"] == 2
+    assert mine.repo.open_blob(mine.repo.get_file("acme/tiny", "main", "model.safetensors").digest).read() == FILES["model.safetensors"]
+    assert second["result"]["added"] == 1
+    again = api.wait_job(api.post("/api/hub/jobs", {"source": "hf", "id": "acme/tiny", "type": "model", "files": ["model.safetensors"]}).json()["job"]["id"])
+    assert again["status"] == "done" and again["result"]["added"] == 0           # the same pick again adds nothing, and says so
+
+
 def test_a_dataset_download(make_live, monkeypatch):
     _, mine, api = _pair(make_live, monkeypatch)
     r = api.post("/api/hub/jobs", {"source": "hf", "id": "acme/tiny-ds", "type": "dataset"})

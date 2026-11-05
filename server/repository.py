@@ -45,6 +45,10 @@ class FileNotFound(Exception):
     pass
 
 
+class RevisionConflict(Exception):
+    """A file arrived for an existing revision with other content than the copy already stored under that path."""
+
+
 class RevisionExists(Exception):
     """Raised when trying to publish a revision that already exists."""
 
@@ -166,6 +170,57 @@ class RepositoryCore:
             file_count=len(manifest.files),
         )
         return dest
+
+    def revision_paths(self, repo_id: str, commit: str) -> set[str]:
+        """The file paths a published revision holds now (empty when it does not exist)."""
+        path = self._storage.manifest_path(repo_id, commit)
+        return {f.path for f in manifests.read(path).files} if path.is_file() else set()
+
+    def publish_or_extend(self, manifest: manifests.Manifest) -> tuple[bool, list[str]]:
+        """Publish a revision, or add the new files of `manifest` to the revision of the same commit that already exists.
+
+        Returns (published, added_paths): (True, []) for a new revision; (False, [paths]) when files were added to an existing
+        one; (False, []) when it already held everything. A commit names fixed content (one upstream commit, or the
+        deterministic id of a local folder), so a file that arrives later for the same commit belongs in it: what a revision
+        already holds is never changed or removed, it only grows. A path whose content differs from what is stored raises
+        RevisionConflict and changes nothing. The whole read-merge-write runs under one lock per repository, so two jobs
+        pulling different files of the same commit at once cannot overwrite each other; readers see the old or the new
+        manifest, never a partial one (atomic rename).
+        """
+        repo_id, commit = manifest.repo_id, manifest.revision.commit
+        dest = self._storage.manifest_path(repo_id, commit)
+        rev_dir = self._storage.revisions_dir(repo_id)
+        rev_dir.mkdir(parents=True, exist_ok=True)
+        from .locks import dir_lock
+        with dir_lock(rev_dir):
+            if not dest.is_file():
+                manifests.write_atomic(manifest, dest)
+                self._events.emit(events.REVISION_PUBLISHED, repo_id=repo_id, commit=commit, file_count=len(manifest.files))
+                return True, []
+            old = manifests.read(dest)
+            have = {f.path: f for f in old.files}
+            added: list[manifests.FileEntry] = []
+            for f in manifest.files:
+                cur = have.get(f.path)
+                if cur is None:
+                    added.append(f)
+                elif cur.blob != f.blob:
+                    raise RevisionConflict(
+                        f"{f.path} in commit {commit[:12]} is {cur.blob} in the library but {f.blob} in what arrived: "
+                        f"the library's copy is kept and nothing was added")
+            if not added:
+                self._events.emit(events.REVISION_PUBLISHED, repo_id=repo_id, commit=commit, file_count=len(old.files),
+                                  note="already-published (idempotent)")
+                return False, []
+            merged = manifests.Manifest(
+                schema_version=old.schema_version, repo_id=old.repo_id, source=old.source,
+                revision=manifests.RevisionInfo(commit=old.revision.commit, fetched_at=manifest.revision.fetched_at,
+                                                license=old.revision.license or manifest.revision.license),
+                files=old.files + added)
+            manifests.write_atomic(merged, dest)
+            self._events.emit(events.REVISION_PUBLISHED, repo_id=repo_id, commit=commit, file_count=len(merged.files),
+                              note=f"extended: +{len(added)} file(s)")
+            return False, [f.path for f in added]
 
     def update_reference(self, repo_id: str, name: str, commit: str) -> dict[str, str]:
         """Point `name` at `commit` and persist. Emits ReferenceUpdated.

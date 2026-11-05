@@ -14,7 +14,7 @@ The Mac folder is still `~/Projects/LLM_repo` because colibri's closeout check a
 
 **Layout.** `server/` the one app: `adapters/hf_adapter.py` (Hub read routes for models and datasets) and `adapters/hf_upload.py` (create repo, preupload, LFS, commit),
 `hub/` (the GUI's JSON API `api.py`, the download queue `jobs.py` + `runner.py`, upstream search/picker `upstream.py`, `upload.py`, `library.py`, `state.py`), `ui/` (the GUI: plain
-JS and CSS, no build step), the core (`repository.py`, `storage.py`, `blobstore.py`, `manifests.py`, `locks.py`: content-addressed blobs, immutable manifests, mutable refs, plain files).
+JS and CSS, no build step), the core (`repository.py`, `storage.py`, `blobstore.py`, `manifests.py`, `locks.py`: content-addressed blobs, manifests that only ever gain files of their own commit, mutable refs, plain files).
 `ingester/` downloads and imports (HF, Civitai, local, the `repo` CLI). `docs/` (start with ARCHITECTURE.md), `tests/` (unit, contract, `compat/` = the REAL huggingface_hub client against
 a live server, `hub/` = the GUI API). The principles in the README (storage is the truth, blobs immutable, derived state rebuildable) are not negotiable.
 

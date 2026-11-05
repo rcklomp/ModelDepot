@@ -257,3 +257,80 @@ def test_multiple_shard_groups_checked_independently(repo: RepositoryCore, tmp_p
     # The error should be about model b (the incomplete one).
     assert exc_info.value.declared == 3
     assert exc_info.value.have == 1
+
+
+# ---- the same upstream commit pulled in several parts (issue #2) --------------------------------------------------
+
+def _ingest(repo, tmp_path, name, commit, files, **kw):
+    staging = tmp_path / name
+    staging.mkdir()
+    return transaction.ingest(repo, _make_snapshot("o/r", commit, staging, files), **kw)
+
+
+def test_a_second_part_of_the_same_commit_is_added_to_the_revision(repo: RepositoryCore, tmp_path: Path):
+    commit = "a1" * 20
+    first = _ingest(repo, tmp_path, "s1", commit, {"README.md": b"readme"})
+    second = _ingest(repo, tmp_path, "s2", commit, {"mtp.gguf": b"weights" * 100, "README.md": b"readme"})
+    assert first.published is True and first.added == 0
+    assert second.published is False and second.added == 1                      # the revision existed; one file arrived
+    assert sorted(f.path for f in repo.list_files("o/r", commit)) == ["README.md", "mtp.gguf"]
+    assert repo.list_revisions("o/r") == [commit]                               # still one revision, same commit id
+    assert repo.get_file("o/r", "main", "mtp.gguf").size == len(b"weights" * 100)
+    assert repo.open_blob(repo.get_file("o/r", "main", "mtp.gguf").digest).read() == b"weights" * 100
+
+
+def test_pulling_what_is_already_there_changes_nothing(repo: RepositoryCore, tmp_path: Path):
+    commit = "b2" * 20
+    _ingest(repo, tmp_path, "s1", commit, {"a.txt": b"A", "b.txt": b"B"})
+    path = repo._storage.manifest_path("o/r", commit)
+    before = path.read_bytes()
+    again = _ingest(repo, tmp_path, "s2", commit, {"a.txt": b"A"})
+    assert again.published is False and again.added == 0
+    assert path.read_bytes() == before                                          # not even rewritten
+
+
+def test_a_path_with_different_content_in_the_same_commit_is_refused(repo: RepositoryCore, tmp_path: Path):
+    commit = "c3" * 20
+    _ingest(repo, tmp_path, "s1", commit, {"a.txt": b"original", "b.txt": b"B"})
+    path = repo._storage.manifest_path("o/r", commit)
+    before = path.read_bytes()
+    with pytest.raises(transaction.IngestError, match="a.txt"):
+        _ingest(repo, tmp_path, "s2", commit, {"a.txt": b"DIFFERENT", "c.txt": b"C"})
+    assert path.read_bytes() == before                                          # nothing was half-added
+
+
+def test_the_missing_shard_can_be_added_later_and_an_old_gap_does_not_block_other_files(repo: RepositoryCore, tmp_path: Path):
+    commit = "d4" * 20
+    s1, s2 = "m-00001-of-00002.gguf", "m-00002-of-00002.gguf"
+    _ingest(repo, tmp_path, "s1", commit, {s1: b"one"}, allow_incomplete_shards=True)       # published with a gap, on purpose
+    other = _ingest(repo, tmp_path, "s2", commit, {"notes.txt": b"n"})                       # an unrelated file: not blocked by the old gap
+    assert other.added == 1
+    done = _ingest(repo, tmp_path, "s3", commit, {s2: b"two"})                               # the other shard alone: judged with what is there
+    assert done.added == 1
+    assert sorted(f.path for f in repo.list_files("o/r", commit)) == sorted([s1, s2, "notes.txt"])
+    with pytest.raises(transaction.IncompleteShards):                                         # a NEW gap is still refused
+        _ingest(repo, tmp_path, "s4", commit, {"x-00001-of-00003.gguf": b"x"})
+
+
+def test_two_ingests_of_one_commit_at_the_same_time_lose_nothing(repo: RepositoryCore, tmp_path: Path):
+    import threading
+    commit = "e5" * 20
+    snaps = []
+    for i in range(6):
+        staging = tmp_path / f"t{i}"
+        staging.mkdir()
+        snaps.append(_make_snapshot("o/r", commit, staging, {f"f{i}.bin": bytes([i]) * 50}))
+    barrier, errors = threading.Barrier(len(snaps)), []
+
+    def go(s):
+        try:
+            barrier.wait()
+            transaction.ingest(repo, s)
+        except Exception as exc:                                                # noqa: BLE001 - reported below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=go, args=(s,)) for s in snaps]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert not errors, errors
+    assert sorted(f.path for f in repo.list_files("o/r", commit)) == [f"f{i}.bin" for i in range(6)]

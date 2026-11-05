@@ -25,7 +25,7 @@ from server import events
 from server.manifests import (
     FileEntry, License, Manifest, RevisionInfo, Source, SCHEMA_VERSION,
 )
-from server.repository import RepositoryCore, RevisionExists
+from server.repository import RepositoryCore, RevisionConflict
 
 from .hf_source import StagedFile, StagedSnapshot
 
@@ -35,8 +35,9 @@ class IngestResult:
     repo_id: str
     commit: str
     file_count: int
-    published: bool       # False if the revision already existed (idempotent)
+    published: bool       # True if this created the revision; False if it already existed
     ref_updated: bool
+    added: int = 0        # files this ingest ADDED to a revision that already existed (the same commit pulled in parts)
 
 
 class IngestError(Exception):
@@ -84,13 +85,16 @@ def ingest(repo: RepositoryCore, snapshot: StagedSnapshot, *,
            progress=None) -> IngestResult:
     """Publish a staged snapshot as a new immutable revision.
 
+    The same commit may be pulled in several parts (first README.md, later one weights file): the files that are new are added
+    to the existing revision (RepositoryCore.publish_or_extend); a path whose content differs is refused (IngestError).
+
     Steps (each emits an event):
       1. For each staged file with a known upstream sha256 (LFS files), verify
          the local content hashes to it — reject on mismatch (IntegrityFailed).
       2. Content-address every file into the blob store (dedup).
       3. Assemble a versioned, sorted, namespaced manifest.
-      4. Atomically publish the manifest (no-op if the revision already exists,
-         making re-ingest of the same commit idempotent).
+      4. Atomically publish the manifest; if the revision already exists, add the files it does not hold yet
+         (nothing to add = no change, so re-ingest of the same commit is idempotent).
       5. Optionally move `ref_name` to the new commit.
 
     Shard completeness: if the snapshot contains a sharded model (filenames
@@ -115,9 +119,9 @@ def _ingest_locked(repo: RepositoryCore, snapshot: StagedSnapshot, *, source_kin
     commit = snapshot.commit
     repo.repository_created(repo_id)
 
-    # Refuse a partial shard set unless explicitly overridden.
+    # Refuse a partial shard set unless explicitly overridden. Shards the library already holds for this commit count.
     if not allow_incomplete_shards:
-        _check_shard_completeness(snapshot.files)
+        _check_shard_completeness(snapshot.files, already_have=repo.revision_paths(repo_id, commit))
 
     file_entries: list[FileEntry] = []
     for i, staged in enumerate(snapshot.files, 1):
@@ -138,17 +142,10 @@ def _ingest_locked(repo: RepositoryCore, snapshot: StagedSnapshot, *, source_kin
         files=file_entries,
     )
 
-    # Idempotent publish: if this commit is already published, don't error.
-    published = True
     try:
-        repo.publish_revision(manifest)
-    except RevisionExists:
-        published = False
-        repo._events.emit(
-            events.REVISION_PUBLISHED,
-            repo_id=repo_id, commit=commit, file_count=len(file_entries),
-            note="already-published (idempotent)",
-        )
+        published, added = repo.publish_or_extend(manifest)
+    except RevisionConflict as exc:
+        raise IngestError(str(exc)) from exc
 
     ref_updated = False
     if update_ref:
@@ -157,7 +154,7 @@ def _ingest_locked(repo: RepositoryCore, snapshot: StagedSnapshot, *, source_kin
 
     return IngestResult(
         repo_id=repo_id, commit=commit,
-        file_count=len(file_entries), published=published, ref_updated=ref_updated,
+        file_count=len(file_entries), published=published, ref_updated=ref_updated, added=len(added),
     )
 
 
@@ -205,22 +202,31 @@ def _store_one(repo: RepositoryCore, staged: StagedFile) -> tuple[str, str]:
 _SHARD_RE = __import__("re").compile(r"^(.+)-([0-9]{5})-of-([0-9]{5})(\.[^.]+)?$")
 
 
-def _check_shard_completeness(files: list[StagedFile]) -> None:
-    """Raise IncompleteShards if any sharded model is missing sibling shards.
+def _check_shard_completeness(files: list[StagedFile], already_have=()) -> None:
+    """Raise IncompleteShards if any sharded model among `files` is missing sibling shards.
 
     Groups shard files by their prefix and declared total, then verifies every
     index 1..total is present. Non-sharded files are ignored. This catches the
     common footgun of ingesting only some shards of a multi-shard model, which
     would otherwise succeed silently and fail confusingly at load time.
+    `already_have`: paths the library already holds for the same commit. They count as present, but only the sets that
+    `files` touches are judged, so an old gap elsewhere never blocks an unrelated file.
     """
+    import os
     # Build a map: (prefix, total, ext) -> set of indices present.
     groups: dict[tuple[str, int, str], set[int]] = {}
     for f in files:
-        m = _SHARD_RE.match(__import__("os").path.basename(f.path))
+        m = _SHARD_RE.match(os.path.basename(f.path))
         if not m:
             continue
         prefix, index, total, ext = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4) or ""
         groups.setdefault((prefix, total, ext), set()).add(index)
+    for path in already_have:
+        m = _SHARD_RE.match(os.path.basename(path))
+        if m:
+            key = (m.group(1), int(m.group(3)), m.group(4) or "")
+            if key in groups:
+                groups[key].add(int(m.group(2)))
 
     for (prefix, total, ext), indices in groups.items():
         if total <= 1:
