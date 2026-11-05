@@ -1,0 +1,241 @@
+# Plan: "Other ModelDepots" — pull models and datasets from another ModelDepot
+
+Status: PLAN rev 2 (2026-11-05), not started. Written by the architect session for an implementer that does not need to be a top-tier model:
+every decision that needs judgment is made below; where something is still unknown the step says **STOP AND REPORT**, it does not say "decide".
+Rev 2 = rev 1 + an independent review (a Sonnet reviewer read the plan against the code; Fable was requested but the harness blocks it, HARD-RULES R17) + the architect's own verification of its main claims. See section 9.
+
+## 0. Rules for the implementer (read first)
+
+1. Read `CLAUDE.md` in the repo root first. Its rules bind you (real-client probe, no new heavy dependencies, one uvicorn worker, no Node build, credentials, push as `claude-bot`,
+   `git pull --ff-only` before every push because another agent also pushes, commit messages end with the attribution lines of your session reminder).
+2. **One phase = one commit** (code + its tests + its doc line together), in the order of section 6. Run the whole suite before each commit: `pytest -q` (Python >= 3.11, `pip install -e ".[test]"`).
+3. **Tests first**: write the tests of a phase, see them fail for the right reason, then make them pass. A test you could not make fail (a positive control) proves nothing.
+4. Do **not** change `ingester/transaction.py`, `server/blobstore.py`, `server/manifests.py`, `server/storage.py`, `server/locks.py` or the behaviour of any HF-compatible route. If a phase seems to need that: **STOP AND REPORT**.
+5. Do not add dependencies. The server's remote HTTP calls use `urllib.request` (as `server/hub/upstream.py` does for Civitai), never `requests`/`httpx` in `server/` or `ingester/`.
+6. HF-client probes: set `HF_HOME` **before** importing `huggingface_hub` (a warm cache hides server errors), `HF_HUB_DISABLE_XET=1`. Tests never contact huggingface.co; "the other ModelDepot" is a second live server from the `make_live` fixture.
+7. Never print, log or return a token. A token travels only in the environment of the runner process or in an `Authorization` header. No token on any command line.
+8. Shell: `rm -rf` with a variable or a glob is blocked by the harness; delete scratch directories with `find <literal path> -mindepth 1 -delete` then `rmdir`.
+9. Report at the end: what was run and what was not ("not run" is never green), per phase the commit sha and `git diff --stat`.
+
+## 1. Goal
+
+Today a ModelDepot fills itself from Hugging Face or Civitai. The owner also has models in **other ModelDepots**: the predecessor's store on an external APFS SSD (`/Volumes/2TB/llm-mirror`, 10 repos, 438 GB, the same on-disk
+format), a second NAS, a laptop. The goal is one capability: **register another ModelDepot as a source; browse its library; queue its repos (all files or a picked subset) into this one**, with the same commit ids, hash-verified,
+resumable, through the queue that already exists (one at a time, download window, disk-space refusal, progress, pause/resume).
+
+*Import* is "pull from there". *Export* is "they pull from here": nothing extra to build, only one line on the Connect page and a paragraph in the docs.
+
+### Non-goals (do not build)
+- No `import-store` / `export-store` command, no store merge, no rsync wrapper (the fast whole-store copy stays a documented manual procedure, P6).
+- No generic "any Hugging Face-compatible server" source; only ModelDepot (0.3.0+ for full fidelity, older ones degrade as in D7).
+- No push to another ModelDepot, no scheduled sync, no deletion on either side, no private repos, no Spaces.
+- No merging of two partial pulls of one commit into one revision (manifests are immutable; see P0 and the open question in section 9).
+
+## 2. Decisions (made; do not reopen)
+
+| # | Decision | Why |
+|---|---|---|
+| D1 | A new source kind **`modeldepot`**, own module `ingester/modeldepot_source.py` beside `hf_source.py` / `civitai_source.py`. It returns the existing `StagedSnapshot`; `transaction.ingest` is used unchanged. | `ingest` is source-agnostic. The generic HF path would lose integrity: ModelDepot's tree route returns `"lfs": null` (`server/adapters/hf_adapter.py` `_tree`), so `hf_source.fetch` would record `sha256=None` and verify nothing. |
+| D2 | **Metadata over ModelDepot's own JSON API** (`/api/hub/library`, `/api/hub/repo`), **bytes over the normal Hub routes** via `huggingface_hub.snapshot_download(endpoint=<source url>)` inside the existing `hf_source._download_with_resume` (retry + Range resume). | Exact per-file sha256 and etag for EVERY file; no new transfer code; the Hub routes are tested with the real client (also commit-pinned revisions and `repo_type="dataset"`, reviewer-verified). |
+| D3 | Every staged file carries the source's **sha256** → `transaction._store_one` verifies it. The staged **etag** is the one the source *serves* (P1). | Faithful provenance; a corrupt/truncated transfer is rejected at ingest. |
+| D4 | The commit id is **preserved** (the receiver pins the source's commit, as `hf_source.fetch` does). | Clients that pinned a revision keep working. |
+| D5 | Sources live in `<store>/config/sources.json` (mode 600), class `Sources` in new `server/hub/sources.py`. **Not** in `settings.json`. | `HubSettings.update` only knows flat keys. |
+| D6 | A source = `{id, name, url, token?}`; `id` a slug (`[a-z0-9-]{1,32}`) from the name; `token` = the *read* token of the other server (optional), stored, **never returned** (API shows `token_set`). Admin token needed to add/remove. A source whose `store_id` equals this server's own is refused (registering yourself). | Same rules as the HF/Civitai tokens. |
+| D7 | Older ModelDepots (0.2.x) have no `etag` in `/api/hub/repo`: then `etag=""` and `transaction` makes the content-derived default; sha256 verification still works; one log line, no failure. They also ignore the `revision` parameter (D19): the receiver filters. | Degrade, do not abort. |
+| D8 | The GUI never talks to the other server (CSP `connect-src 'self'`, `server/main.py` `_CSP`): the server proxies. | |
+| D9 | A job's spec stores `endpoint` (source id), `endpoint_name` and, for display only, `endpoint_url`. **`JobManager._start` re-reads the source from the registry at start**, writes the registry's current URL into the spec file it hands to the runner, and takes the token from the same snapshot. Source gone → the job ends `failed` with "source <name> was removed" and no process is started. Token in the child environment variable **`MD_SOURCE_TOKEN`** only. | Otherwise re-registering an id with a new URL would send the new token to the old URL. |
+| D10 | **No credential of this machine may reach another server.** (1) `modeldepot_source.fetch` always calls `snapshot_download(token=<source token> or False)` — never `None` (verified in `huggingface_hub/utils/_headers.py` `get_token_to_send`: `None` falls back to `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN` and the token file `~/.cache/huggingface/token`; only `False` forbids). (2) `job_env` (P4) drops from the child environment every variable whose name contains `TOKEN`, `API_KEY`, `SECRET` or `PASSWORD` except `MD_SOURCE_TOKEN`, and sets `HF_HUB_DISABLE_IMPLICIT_TOKEN=1`. (3) The CLI `ingest-modeldepot` takes its token ONLY from the environment `MD_SOURCE_TOKEN` (no `--token` flag) and passes `False` when there is none. | The owner's Hugging Face credential must not be handed to a LAN host. |
+| D11 | Dedupe key of queued jobs becomes `(source, endpoint, type, id)` (read with `.get("endpoint")`: persisted old specs have none). Staging path `staging/md-<endpoint>-<slug(core id)>` (fixed per repo+source so resume finds it). CLI staging: `staging/md-cli-<slug(host)>-<slug(core id)>`. | |
+| D12 | Registering requires the address to answer now: `GET <url>/healthz` JSON with `ok: true` and a `store_id`; `GET <url>/api/hub/status` supplies the version (shown, not enforced). Later outages are ordinary job errors. | Catches typos and wrong tokens when the admin is looking. |
+| D13 | Remote HTTP: ONE client function (D18), `urllib.request` only. Admin-only registration is the trust boundary; LAN addresses are the point. A hostile source can still choose which files `snapshot_download` fetches (it uses the source's own file list); D15 limits the damage. | |
+| D14 | In the Download page each registered source is one more entry of the "Source" switch. For such a source the left list is the **source's library** (filter box, checkboxes, "Queue selected"), not a search. | Ten repos must not be ten manual round trips. |
+| D15 | **The remote file list is untrusted input.** Before anything is downloaded `modeldepot_source` validates every entry: `path` is a string of 1..1024 chars, not absolute, no backslash or control characters, no empty/`.`/`..` segment, first segment not `.cache`; no duplicate paths; `size` an int >= 0; `sha256` matches `^[0-9a-f]{64}$`. Any violation → `HfSourceError("<url> sent an invalid file list (<what>)")`. If `patterns` are given, every pattern must match at least one file and the selection must not be empty, else `HfSourceError("file <pattern> is not in <repo>@<commit>")`. | `huggingface_hub` does not reject `..` on Linux; a missing/odd sha256 would silently skip verification (`transaction.py` `_store_one`); an empty selection would publish an empty revision and move `main` to it. |
+| D16 | **Do not download what the store already has.** `fetch(..., have_blob=callable)`: a file whose sha256 `have_blob` accepts is left out of the download patterns and staged with a non-existent `local_path` (supported by `transaction._store_one`: "staged file vanished and blob present"); if every file is present, `snapshot_download` is not called at all. The runner passes `have_blob=lambda d: storage.blobs.exists(d)`. | Same bytes in two repos are fetched once; recovery after a mid-ingest failure does not re-download files the store already took (`put_file` moves staged files); re-pulling a stored commit is free. |
+| D17 | **A pull of a commit that is already stored with FEWER files must fail loudly, not "succeed" silently.** (P0, all sources.) | Verified bug in the existing Hugging Face path: see P0. |
+| D18 | One HTTP client: `modeldepot_source.http_get_json(url, token, *, max_bytes, timeout=30, deadline=60)`; `server/hub/sources.py` imports it and wraps errors in `upstream.UpstreamError`. It uses `urllib.request.build_opener(_NoRedirect(), urllib.request.ProxyHandler({}))` (`_NoRedirect.redirect_request` returns `None`, so a 3xx raises → message "answered with a redirect: use the final address"; environment proxies are ignored), reads in 64 KB chunks, enforces the total deadline, fails with "too large" above `max_bytes`, and sends `Accept: application/json` and `User-Agent: modeldepot/<version>`. Only `http`/`https`; URL without `user:pass@`, query or fragment. | A security-sensitive client exists once. |
+| D19 | `GET /api/hub/repo` gets an optional `revision=<ref or commit>`; with it only that revision is returned (P1). The receiver always passes it. Library cap 20 MB, repo detail cap 20 MB; over the cap → "<repo> has too many files to list (limit 20 MB)". | The unfiltered detail loads every revision's manifest (`library.py:65-95`); a 100k-file dataset would be tens of MB on an Atom with 4 GB. |
+
+## 3. Facts verified (2026-11-05, repo at tag v0.2.1 = `fd0c4c4`)
+
+| Fact | Where |
+|---|---|
+| `transaction.ingest(repo, snapshot, *, source_kind, source_ref, ref_name="main", license_name=None, update_ref=True, allow_incomplete_shards=False, progress=None)`; a commit that already exists → `published=False` and NOTHING is added; `update_reference` still runs | `ingester/transaction.py:79`, `:143-157` |
+| `_store_one`: verifies `StagedFile.sha256` only when set; a vanished staged file is accepted if its blob exists | `ingester/transaction.py:~170-195` |
+| `StagedFile(path, local_path, size, etag, sha256)`, `StagedSnapshot(repo_id, revision_requested, commit, staging_dir, files)` | `ingester/hf_source.py:31`, `:42` |
+| `hf_source._download_with_resume(snapshot_download_fn, *, repo_id, repo_type, revision, staging_dir, token, allow_patterns, ignore_patterns, endpoint, max_retries, progress_log)` | `ingester/hf_source.py:254` |
+| `hf_source._lift_size_guard()` is called inside `hf_source.fetch` (files > 50 GB). **Call it in the new fetch too.** | `ingester/hf_source.py:63` (def), `:107` (call) |
+| `snapshot_download` with a failing `repo_info` and a non-empty `local_dir` returns normally without downloading | `huggingface_hub/_snapshot_download.py:~270-300` (v1.8.0) |
+| A file that exists in staging with matching `.cache/huggingface/download/<path>.metadata` is skipped on the next `snapshot_download` even if it is corrupt | `huggingface_hub/file_download.py` (reviewer-cited, ~1253) |
+| Job submission, dedupe key, disk check | `server/hub/jobs.py:145` (`submit_download`), dedupe ~168, `_ID_OK` :25, `MARGIN_BYTES` :26 |
+| Child env (tokens) and command line | `server/hub/jobs.py:276` (`_start`) |
+| `JobManager(repo, storage, HubSettings(root))` is called positionally in tests and in main | `tests/hub/test_jobs.py:100`, `server/main.py:72` |
+| Runner branches on `spec["source"]`; `staging_path` | `server/hub/runner.py:28`, `:51` |
+| `JobSpec` | `server/hub/api.py:23` |
+| `R, A = [Depends(require_read)], [Depends(require_admin)]` | `server/hub/api.py:81` |
+| `library.list_library` items `{id, type, core_id, commit, files, size_bytes, revisions, updated, source, source_ref, license, formats}`; `library.detail` returns `{**summary, refs, revisions:[{commit, fetched_at, files:[{path,size,sha256}]}], readme}` | `server/hub/library.py:49`, `:65` |
+| The etag the Hub routes SERVE: `_hf_compat_etag(file_meta)` (needs `.metadata`, `.digest`; repairs old `local-...` etags) | `server/adapters/hf_adapter.py:88` |
+| Picker data = `upstream.describe_tree(kind, entries)` with entries `{"path","size"}`; `escape_glob`, `patterns_for`, `match_files` | `server/hub/upstream.py:57`, `:36`, `:40` |
+| `UpstreamError(message, status)` mapped to HTTP statuses | `server/hub/upstream.py`, `server/hub/api.py:150` |
+| Picker builds the job body | `server/ui/views/picker.js:170-171` |
+| `sourceName` maps manifest `source.kind` to a label | `server/ui/lib.js:94` |
+| The only code that reads `source.kind` besides `sourceName`: `repo.js:27` builds a link from `source_ref` | `server/ui/views/repo.js:27` |
+| CLI `ingest-hf` flags: `repo_id --type --rev --token --allow --ignore --ref --no-update-ref --allow-incomplete-shards --license --endpoint` | `ingester/cli.py:47-66`, `_cmd_ingest_hf` :155 |
+| Tests: second server as upstream; `stage_repo(repo, repo_id, files, commit, repo_type, etag)`; `Api(live)` | `tests/hub/test_jobs.py:10` (`_pair`), `tests/compat/conftest.py:39`, `tests/hub/conftest.py` |
+| Writes at server start: `.store-id`, the directory skeleton (`Settings.ensure_dirs`), `config/admin-token`, `jobs/` | `server/config.py:91`, `server/hub/state.py:85` |
+| `.DS_Store` files do not disturb the app (`iter_repos`, `list_revisions` test `is_dir()`) | `server/storage.py:112`, `server/repository.py:67` |
+| **The SSD store `/Volumes/2TB/llm-mirror` is servable by v0.2.1 without writing to it**: a scratch store dir whose `blobs` and `repos` are symlinks to the SSD; `MIRROR_ROOT=<scratch>`; 10 repos listed; real `snapshot_download` of two repos matched every manifest sha256; a 1 MB range read at 2.7 GB inside a 108 GB repo equalled the SSD bytes; 0 files on the SSD changed. All 124 blobs hash to their names; all manifests are `schema_version` 1. | architect session |
+| **Verified bug (P0):** two partial pulls of one commit of the same repo (`README.md`, then `config.json`) both end `done`; the library holds only `README.md`. | architect session, with `tests/hub/test_jobs.py::_pair` |
+
+## 4. Contracts
+
+### 4.1 The other server (changed in P1)
+`GET /api/hub/repo?type=<model|dataset>&id=<public id>[&revision=<ref|commit>]`: each file of `revisions[].files[]` gains `etag` (the etag the Hub routes serve for it); with `revision` only that revision is returned (404 "revision not found" for an unknown one).
+
+### 4.2 This server's new routes (all under `/api/hub`; the path parameter is **`sid`**, because the repo id travels as the query parameter `id`)
+| route | auth | request | response |
+|---|---|---|---|
+| `GET /sources` | read | — | `{"sources":[{"id","name","url","token_set":bool}]}` |
+| `POST /sources` | admin | `{"name","url","token"?,"id"?}` | `{"source":{...public...},"remote":{"version","store_id","repos"}}`. Same `id` = replace (absent `token` keeps the stored one, `""` clears it). 400 with a sentence: bad URL / unreachable / not a ModelDepot / the other side said 401 (read token) / that is this server itself. |
+| `DELETE /sources/{sid}` | admin | — | `{"ok":true}`; 404 unknown; 409 "a download uses it" (P4) |
+| `GET /sources/{sid}/library?type=all\|model\|dataset&q=` | read | — | `{"items":[` remote items reduced to the known keys, ids that fail `_ID_OK` dropped, `+ "in_library","same_commit","partial"` `]}`; 502 with a sentence if unreachable. `in_library` = same id and type present; `same_commit` = present with the same commit **and** equal `files` and `size_bytes`; `partial` = same commit but different `files`/`size_bytes`. |
+| `GET /sources/{sid}/repo?type=&id=&revision=main` | read | — | the shape of `GET /upstream/files?source=hf` (`upstream.describe_tree` output) plus `source:"modeldepot"`, `endpoint:<sid>`, `type`, `id`, `revision`, `commit`, `license`, `gated:false` |
+| `POST /jobs` | admin | `JobSpec` + `endpoint: str\|null`; `source:"modeldepot"` requires a registered `endpoint` | as today |
+
+Note: the read routes use the stored token, so a holder of this server's read token can browse a private source. Accepted (D13).
+
+Job spec stored for this source: `{"source":"modeldepot","endpoint","endpoint_name","endpoint_url","id","type","revision","patterns","allow_incomplete_shards","total_bytes","file_count"}`. Job `label`: `"<id>  ←  <endpoint_name>"`.
+
+### 4.3 Manifest on the receiving side
+`source.kind = "modeldepot"`, `source.ref = "<url>/#/repo/<type>/<id>"` (the other GUI's page for it; `repo.js:27` turns `source_ref` into a link), per-file `metadata.hf.etag` = the served etag, `x_repo_commit` = the source's commit, `checksums.sha256` verified. Licence is not carried (as with the Hugging Face path today). Update the kind comment at `server/manifests.py:35` (comment only).
+
+## 5. Traps (each cost someone time)
+- `token=None` to `snapshot_download` is NOT "no token" (D10).
+- A file with matching metadata in staging is skipped on resume even if corrupt: on a size/sha mismatch delete the file AND its `.cache/huggingface/download/<path>.metadata` (and `.lock`, `.incomplete`) before raising (P0/P2b).
+- `snapshot_download` can return without downloading when the source is unreachable (D2 table): after it returns, check that every wanted file exists with the right size; if not, call it again (max 3 times), then fail with "<url> became unreachable while downloading".
+- Download patterns are globs: file names with `[ ] * ?` must be escaped: copy the one-liner of `upstream.escape_glob` (`server/hub/upstream.py:31`: `re.sub(r"([*?\[])", r"[\1]", path)`; `ingester/` must not import `server.hub.*`); test with a file called `a[1].txt`.
+- Dataset ids: library items have `type:"dataset"` and `id` WITHOUT `datasets/`; `core_id` has it. Use `storage.core_repo_id(type, id)` for the receiving repo id.
+- A source URL may carry a path prefix (reverse proxy): join with `url.rstrip("/") + "/api/hub/..."`, never `urljoin`.
+- The etag logic exists ONCE (P1, `served_etag`), not copied.
+- `HF_HUB_DISABLE_XET=1` is set in the image and `hf_xet` is removed on purpose; never "fix" a download by installing it.
+- The GUI is plain JS modules, no build step, no framework, no npm; every user-visible string is plain English and short.
+
+## 6. Phases
+
+### P0 — Fix the silent loss (existing bug, all sources) — runner only
+Verified 2026-11-05: partial pull #1 of a commit stores it with some files; partial pull #2 of the same commit ends `done` but stores nothing (`transaction.ingest` returns `published=False`; its blobs become orphans for GC).
+- Test first (`tests/hub/test_jobs.py`, new, uses `_pair`): `test_a_second_partial_pull_of_the_same_commit_is_not_silently_dropped`: pull `files=["README.md"]`, then `files=["config.json"]` of `acme/tiny`. Expected after the fix: job 2 is `failed`, its `message` contains "already in the library with only some of its files" and "config.json"; the library still holds only `README.md`. And `test_the_same_partial_pull_twice_is_idempotent`: the same subset again → `done`.
+- `server/hub/runner.py`: after `transaction.ingest(...)` (hf branch; the civitai branch too): `if not result.published:` read `repo.get_manifest(result.repo_id, result.commit)`; `missing = [f.path for f in snapshot.files if f.path not in {x.path for x in manifest.files}]`; if `missing`, `emit(phase="error", message=f"{public id} is already in the library with only some of its files (missing: {', '.join(missing[:5])}). Delete it from the Library and download again with all the files you want.")`, keep the staging directory (cheap retry), return 1. Put this in a helper `ensure_nothing_dropped(repo, snapshot, result)` that P4 reuses.
+- Heal: also in the runner, catch `ingester.transaction.IntegrityMismatch` (`e.path`): call new helper `forget_staged(staging, path)` which deletes `staging/<path>` and `staging/.cache/huggingface/download/<path>.metadata|.lock|.incomplete` (ignore missing), then re-raise (the job fails; Retry fetches that file again). Test: monkeypatch `transaction.ingest` to raise `IntegrityMismatch("model.safetensors", "a", "b")` after a successful download → job `failed`; the staged file and its `.metadata` are gone; resubmitting (restore the real `ingest`) → `done`.
+- Done: suite green. Note the behaviour change in the commit message ("silent success became an explicit failure").
+
+### P1 — The other side tells the etag and can narrow to one revision (server)
+- New `server/etags.py`: `def served_etag(metadata: dict | None, digest: str) -> str` containing exactly the logic of `_hf_compat_etag` (incl. the `local-` repair and the `f'"{digest[:32]}-1000"'` fallback). `hf_adapter._hf_compat_etag(file_meta)` becomes a one-line call. Behaviour of the Hub routes must not change (compat tests prove it).
+- `server/hub/library.py`: each file dict gets `"etag": served_etag(f.metadata, <sha256>)`; `detail(repo, core_id, revision=None)`: with `revision` (ref name or commit) only that revision is built and the readme comes from it; unknown → `None` → the route answers 404 "revision not found". `server/hub/api.py` `repo_detail` gets `revision: str = ""`.
+- Tests (`tests/hub/test_api.py`): (a) `stage_repo`; each file's `etag` equals the `ETag` header of `HEAD /acme/tiny/resolve/main/<path>`; (b) `stage_repo(..., etag="local-abc")` → the reported etag is the content-derived one and equals the HEAD header; (c) two revisions (two `stage_repo` calls with different commits): `revision=<c1>` returns only c1, `revision=main` only the main one, `revision=nope` → 404, no `revision` → both (unchanged).
+- Docs: the two changes in `docs/GUI-API.md` (`/repo` row). Done: suite green.
+
+### P2a — The source module: metadata, validation, token isolation (ingester)
+New `ingester/modeldepot_source.py` (no import of `server.hub.*`; `server.storage.core_repo_id` is fine):
+```python
+class _NoRedirect(urllib.request.HTTPRedirectHandler): ...
+def http_get_json(url, token, *, max_bytes, timeout=30, deadline=60) -> object      # D18
+def fetch(base_url, repo_id, staging_dir, *, repo_type="model", revision="main", patterns=None, token=None,
+          have_blob=None, max_retries=6, progress_log=None) -> StagedSnapshot       # P2a: steps 1-3 + 5-6; P2b adds the rest
+```
+Steps of `fetch`: (1) `http_get_json(f"{base}/api/hub/repo?type=..&id=..&revision=..", token, max_bytes=20 MB)`; errors → `HfSourceError`: 404 → "<id> is not in the library of <base>"; 401/403 → "… asks for a read token"; unreachable → names the address; not JSON → "<base> is not a ModelDepot". (2) pick the commit: `revision` in `d["refs"]` → that commit; else a hex string equal to a `commit` of `d["revisions"]`; else `HfSourceError`. (3) take that revision's files (an old source ignores `revision`: filter yourself), validate per D15. (4) *(P2b)* download. (5) build `StagedFile(path, staging_dir/path, size, etag=<remote etag or "">, sha256=<remote sha256>)`. (6) return `StagedSnapshot(repo_id=core_repo_id(repo_type, repo_id), revision_requested=revision, commit=commit, staging_dir=staging_dir, files=sorted by path)`.
+- Tests `tests/unit/test_modeldepot_source.py` (`upstream = make_live(admin_token="u"); stage_repo(upstream.repo)`; for steps that stop before the download, monkeypatch `huggingface_hub.snapshot_download` with a recorder):
+  1. `http_get_json` against a tiny `http.server` thread: HTML body → error; a 302 → "redirect" error; a body above `max_bytes` → "too large"; JSON → parsed. (Positive control: the JSON case.)
+  2. metadata → `StagedFile.sha256` equals the upstream sha for every file; `etag` equals the upstream `HEAD` ETag; `commit == COMMIT`.
+  3. D15: monkeypatch the JSON to contain `../x`, `/abs`, `.cache/x`, a duplicate path, `sha256="zz"`, a negative size → each raises `HfSourceError` naming the problem; a pattern matching nothing → "file … is not in"; empty selection → error.
+  4. `test_snapshot_download_never_gets_token_none`: recorder asserts `token is False` when `fetch(token=None)` and equals the string when given; set `HF_TOKEN` and `HUGGING_FACE_HUB_TOKEN` in the test environment first (positive control: the same test with the old `hf_source.fetch` shows `token=None`).
+  5. unknown repo / unknown revision / wrong read token (`make_live(admin_token="u", auth_token="tok-xyz-123")`) → readable `HfSourceError` messages without "Traceback".
+  6. old source without `etag` (monkeypatch the JSON to drop it) → `etag == ""`.
+- Done: green. (The real download is P2b.)
+
+### P2b — Download robustness and the CLI (ingester)
+- Step 4 of `fetch`: `hf_source._lift_size_guard()`; wanted = files not accepted by `have_blob(sha)`; if none wanted → skip the download (no `snapshot_download` call); else `hf_source._download_with_resume(snapshot_download, repo_id=..., repo_type=..., revision=commit, staging_dir=..., token=<token or False>, allow_patterns=[escaped paths of the wanted files], ignore_patterns=[".cache/**"], endpoint=base_url, max_retries=..., progress_log=...)` (lazy import of `snapshot_download` as `hf_source.fetch` does). Then verify every wanted file: exists and `size` equals; a size mismatch → `forget`-style deletion of the file and its `.metadata`/`.lock`/`.incomplete`, then `HfSourceError`; missing files → run the download again (max 3 times in total) and then fail "<url> became unreachable while downloading". Files accepted by `have_blob` are staged with their (non-existent) path.
+- `ingester/cli.py`: `ingest-modeldepot <id> --from <url> [--type] [--rev] [--allow GLOB ...] [--ref] [--no-update-ref] [--allow-incomplete-shards]` modelled on `ingest-hf` (`_cmd_ingest_hf` :155); token ONLY from env `MD_SOURCE_TOKEN`; `have_blob` from the opened store; staging per D11; `source_kind="modeldepot"`, `source_ref` per 4.3.
+- Tests (same file, two live servers, real download): (1) `test_fetch_and_ingest_keep_everything`: `fetch` → `transaction.ingest(mine.repo, snap, source_kind="modeldepot", source_ref=...)`; every file's bytes equal `FILES[path]`; manifest `source.kind == "modeldepot"`; the stored per-file etag equals the upstream's served etag. (2) only requested files (`patterns=["config.json"]`). (3) corruption control: flip one byte of a staged file after `fetch` → `ingest` raises `IntegrityMismatch`. (4) dataset (`stage_repo(upstream.repo, "datasets/acme/tiny-ds", {...}, commit="d"*40)`). (5) `have_blob`: pre-store one file's bytes in `mine.repo`, fetch → the recorder (wrap the real `snapshot_download`) shows that file's pattern absent; ingest still stores the right blob; with ALL files present the recorder is not called at all. (6) file named `a[1].txt` downloads. (7) retry loop: recorder that returns without downloading twice, then really downloads → success; always → "became unreachable". (8) truncated staged file (write fewer bytes into the staged file between download and check, via a recorder that truncates) → error, and file + `.metadata` removed. (9) **Range resume**: put N wrong bytes into `huggingface_hub`'s `.incomplete` file for one file (path from `huggingface_hub._local_folder.get_local_download_paths(Path(staging), path).incomplete_path(etag)`; if that helper has moved, report "Range resume: not tested" instead of skipping silently) → `fetch` finishes and `ingest` raises `IntegrityMismatch` (the download continued from the wrong bytes, which proves Range was used and the check catches it). (10) CLI test mirroring how `tests/unit/test_cli.py` drives `ingest-hf`.
+- Done: green.
+
+### P3 — Registry and routes (server)
+- New `server/hub/sources.py`: `normalize_url(text)` (D18 rules; `ValueError` with a sentence); `class Sources(root)` over `<root>/config/sources.json` (write with `state._write_private`; lock; slug logic with `-2`, `-3` on collision); `probe(url, token)` (D12: `/healthz`, `/api/hub/status`; refuses `store_id == own store_id`); `library(source, type, q, local_repo)` and `describe(source, kind, repo_id, revision)` built on `modeldepot_source.http_get_json` (errors → `upstream.UpstreamError(message, status)`); `in_library`/`same_commit`/`partial` per 4.2; `describe` resolves the revision like P2a step 2 and calls `upstream.describe_tree`.
+- `server/main.py`: build `Sources(active_settings.mirror_root)`; add `sources` to `HubContext`. `server/hub/api.py`: the routes of 4.2 (`R`/`A`; map `UpstreamError` like `/upstream/files`; unknown `sid` → 404 "no such source"). The `DELETE` 409 comes in P4.
+- Tests `tests/hub/test_sources.py`:
+  1. auth: POST/DELETE → 401 without the admin token; GET open. The distinctive token `tok-xyz-123` (used as the upstream's `auth_token`) appears in NO response body (`/sources`, `/settings`, `/jobs`, the POST reply) and `config/sources.json` has mode `0600` and contains it (that is how "stored" is observed).
+  2. add: `remote.repos` equals the upstream's count; a closed port on 127.0.0.1 → 400 sentence; wrong read token → 400 mentioning "token"; `upstream.url + "/ui"` (answers HTML) → 400 "not a ModelDepot"; registering this server's own URL → 400 "this server itself".
+  3. replace: same `id`, `token` absent keeps it (verify by listing the library through the source still working with the read-token upstream), `""` clears it (then it fails).
+  4. `library` flags: same repo+commit staged locally with equal files → `same_commit` true; same commit but a subset locally → `partial` true; different commit → `in_library` true, `same_commit` false; an unknown key in the remote item is dropped (monkeypatch).
+  5. `repo` returns the picker shape: its keys include those of `upstream.describe_tree(...)`, `source == "modeldepot"`.
+  6. `normalize_url` table: accepts `http://10.0.0.5:8091/`, `https://md.example.org/prefix`; rejects `ftp://x`, `http://u:p@h`, `http://h/?a=1`, `http://`, empty.
+- Docs: the five routes in `docs/GUI-API.md`. Done: green.
+
+### P4 — Jobs and runner
+- `server/hub/api.py` `JobSpec`: `endpoint: str | None = None`.
+- `server/hub/jobs.py`: `JobManager.__init__(..., sources=None)` as a **keyword** (the existing positional calls keep working; update `server/main.py:72` to pass it). `submit_download` accepts `source == "modeldepot"` per 4.2 (registered `endpoint` required, `_ID_OK`, `type` model|dataset), label per 4.2; dedupe key per D11. Extract the child-environment construction of `_start` into a module function `job_env(base_env, spec, hub_settings, source) -> dict` (D10 rules; `hf`/`civitai` unchanged). `_start` for `modeldepot` re-reads the source (D9). `uses_endpoint(sid)` (queued/running/paused download jobs) → the `DELETE /sources/{sid}` 409 "a download from it is queued or running".
+- `server/hub/runner.py`: `staging_path` for `modeldepot` (D11); new branch: `modeldepot_source.fetch(spec["endpoint_url"], spec["id"], staging, repo_type=spec["type"], revision=spec.get("revision") or "main", patterns=spec.get("patterns"), token=os.environ.get("MD_SOURCE_TOKEN") or None, have_blob=lambda d: storage.blobs.exists(d))`, then `transaction.ingest(repo, snapshot, source_kind="modeldepot", source_ref=<4.3>, ref_name="main", progress=progress, allow_incomplete_shards=...)`, the P0 helpers (`ensure_nothing_dropped`, `forget_staged` on `IntegrityMismatch`), the same `emit(...)` phases as the `hf` branch.
+- `server/ui/lib.js:94` `sourceName`: add `modeldepot: 'ModelDepot'`.
+- Tests `tests/hub/test_sources_jobs.py` (pattern of `tests/hub/test_jobs.py`; do **not** set `MIRROR_UPSTREAM_HF`):
+  1. a job from another ModelDepot runs to `done`; `mine` serves the repo with the same commit and identical bytes; `GET /api/hub/repo` shows `source == "modeldepot"`; staging cleaned; the same job again → `done` with no download (`have_blob`).
+  2. picked files only; 3. dataset job.
+  4. dedupe: two identical submits → second `already_queued`; same repo from another registered source → a different job (hold the queue with a closed download window as `test_the_same_download_is_not_queued_twice` does).
+  5. `test_job_env_never_carries_the_hf_token` (unit, on `job_env`): with an HF token, a Civitai key and a source token configured, the env of a `modeldepot` job has `MD_SOURCE_TOKEN`, `HF_HUB_DISABLE_IMPLICIT_TOKEN=1`, and no `HF_TOKEN`/`HUGGING_FACE_HUB_TOKEN`/`CIVITAI_API_KEY`; **positive control:** the env of an `hf` job still has `HF_TOKEN`.
+  6. read-token upstream: the job succeeds with the token stored on the source; the token string is absent from `GET /jobs`, from `jobs/*.json`, from every `*.spec.json` in the store and from the job's message/log.
+  7. `DELETE /sources/{sid}` → 409 while the job is queued, 200 after `remove`.
+  8. **re-registration**: submit a job (held by the closed window), then `POST /sources` with the same id and a URL of a closed port; open the window → the job `failed`, its message names the NEW address (D9: the new URL, not the old live one).
+  9. source removed while the job is queued → the job ends `failed` "source … was removed".
+  10. a dead source (upstream server stopped) → `failed`, message names the address, no traceback.
+  11. P0's `ensure_nothing_dropped` also guards this branch (subset pull twice of one commit).
+- Done: green.
+
+### P5a — GUI: Settings, Connect, queue label (plain JS)
+- `server/ui/views/settings.js`: `load()` fetches `/settings` and `/sources` together and passes the list to `draw(s, keepScroll, sources)`; new card "Other ModelDepots" between the Civitai card and "Downloads": rows (name, address, a dot "token stored", a Remove button using `confirmDialog` from `lib.js:~196`; a 409 shows the server's sentence as a toast), and an add form (Name, Address, Read token `type=password` `autocomplete=new-password`, Add). Text: *"Add another ModelDepot, for example one on your Mac with an external disk, to download its models here. The read token is only needed if that server asks for one. Tokens are never shown again."* After Add: toast "Added <name> (ModelDepot <version>, <n> repositories)"; errors show the server's sentence.
+- `server/ui/views/connect.js`: one short paragraph under the tabs: *"Another ModelDepot can pull from this one: on that server open Settings → Other ModelDepots and add <this address> (and the read token, if you set one)."* using the address the page already shows.
+- `server/ui/views/queue.js`: if a row prints the source, use `sourceName`; otherwise nothing.
+- Manual checklist (report each line done / not done; run two servers: `MIRROR_ROOT=<tmp>/a` seeded with `repo ingest-local` on :8001 and an empty one on :8002): 1. add `http://127.0.0.1:8001` → toast with version and count, listed, survives reload, the token is never shown; 2. a wrong address → plain-English error, nothing listed; 3. Remove asks for confirmation; 4. keyboard: Tab reaches every control, focus visible; 5. Connect shows the new paragraph.
+
+### P5b — GUI: the source's library on the Download page
+`server/ui/views/download.js` is a chain of `civ ? … : …` branches (lines ~62, 104, 120, 130, 150, 158): replace them by an explicit `const mode = memo.src === 'civitai' ? 'civ' : memo.src.startsWith('md:') ? 'md' : 'hf'` and keep the `hf` and `civ` code paths **byte-for-byte equivalent in behaviour**.
+- State: add `memo.mdType = 'all'`, `memo.mdFilter = ''`, `memo.mdItems = null`, `memo.mdTicked = new Set()`; do not reuse `memo.type`/`memo.version`. When the Source switch changes, reset `memo.sel/results/err` as the existing handler does. After `GET /sources` loads, if `memo.src` is `md:<id>` and `<id>` is not registered any more, fall back to `'hf'`.
+- The Source switch (`seg`, line ~89) = `[['hf','Hugging Face'],['civitai','Civitai'], ...sources.map(s => ['md:'+s.id, s.name])]`.
+- In `md` mode: no search form, no paste form; a filter box, a Models/Datasets/All switch, a bar "Select all (N, X GB) · Queue selected (N, X GB)". `loadSourceLibrary()` calls `GET /sources/<sid>/library`. Rows: `<li><label class="md-pick"><input type="checkbox" aria-label="Select <id>"></label><button type="button" class="res">…</button></li>` (a checkbox inside a button is invalid and not keyboard-reachable) showing id, size, file count, format badges, and "Already in library" (`same_commit`), "Partly in library" (`partial`) or "Other version in library" (`in_library` only). "Select all" skips `same_commit` rows. Row selection state (`isSel`) compares `memo.sel.endpoint`, `memo.sel.type` and `memo.sel.id` (library items' own `source` field is the manifest kind and must not be compared).
+- "Queue selected": FIRST sum the ticked sizes and refuse with a sentence if the sum exceeds `state.status.free_bytes` (the per-job check in `jobs.py` cannot see the other queued jobs); then POST one job per ticked repo, sequentially, `{source:'modeldepot', endpoint, id, type, revision:'main', files:null, total_bytes:size_bytes, file_count:files}`; toast "Queued N downloads" with a link to the Queue page; a failed POST shows the server's sentence and stops.
+- Manual checklist: 1. the new source appears in the Source switch; its library lists with sizes and badges; the filter works; 2. tick two repos → Queue selected → both run one at a time and finish; the Library shows them with source "ModelDepot"; 3. again → "Already in library", Select all ticks none; 4. a total larger than free space (use a fake `free_bytes` in a dev console, or a tiny test volume) is refused with a sentence; 5. delete the source in Settings, return to Download → falls back to Hugging Face without errors; 6. Hugging Face and Civitai tabs behave as before (search, picker, download); 7. keyboard: Tab reaches checkbox, row button and Queue button.
+
+### P5c — GUI: pick files of one repo from a source
+- `loadPicker` (download.js ~143): for `memo.sel.source === 'modeldepot'` call `GET /sources/<endpoint>/repo?type=&id=&revision=` instead of `/upstream/files`.
+- `server/ui/views/picker.js:170-171`: when `d.source === 'modeldepot'` the body is `{source:'modeldepot', endpoint:d.endpoint, id:d.id, type:d.type, revision:d.commit, files: all ? null : [...sel], total_bytes, file_count}` (the commit, not `'main'`, so the picked files mean what the user saw). Keep the Hugging Face and Civitai bodies untouched.
+- Manual checklist: click a row (not the box) → the file picker opens with sizes; pick two files → only those arrive; picking a second set of the same repo later fails with the P0 sentence (expected).
+
+### P6 — Docs and version
+- `README.md`: one bullet under "What you get": *"Pull from another ModelDepot: add it under Settings; its library appears on the Download page."*
+- `docs/DEPLOYMENT.md` new section "6. Moving models between ModelDepots":
+  - *Which method*: this feature (any size, resumable, verified, through the GUI; the receiving machine hashes every file, so hundreds of GB onto the NAS's small CPU take hours) vs the manual whole-store copy (fast, network-limited; only for a first bulk move).
+  - *Serving a ModelDepot store that sits on a disk the NAS cannot read (the owner's APFS SSD)*, verified 2026-11-05 with today's code: `S=~/modeldepot-ssd; mkdir -p $S; ln -s /Volumes/2TB/llm-mirror/blobs $S/blobs; ln -s /Volumes/2TB/llm-mirror/repos $S/repos; MIRROR_ROOT=$S MIRROR_ADMIN_TOKEN=<any> python -m uvicorn server.main:app --host 0.0.0.0 --port 8091` (package installed with pip). The SSD is only read; the server writes its own files into `$S`. Docker variant (state truthfully whether P7 verified it): `docker run -d --name md-ssd -p 8091:8000 -v $S:/data -v /Volumes/2TB/llm-mirror/blobs:/data/blobs:ro -v /Volumes/2TB/llm-mirror/repos:/data/repos:ro modeldepot:latest`. Then on the NAS: Settings → Other ModelDepots → `http://<mac>:8091`. macOS may ask to allow incoming connections.
+  - *The manual whole-store copy*: `blobs/` first, `repos/` last; `rsync -rt --ignore-existing --exclude .DS_Store` (never `--delete`); leave `events.jsonl`, `index/`, `config/`, `.store-id` alone; no garbage collection during it; why `--partial --inplace` together with `--ignore-existing` leaves truncated blobs for good. Mark the commands "not tested against the NAS".
+  - *Export*: the other machine adds this one as a source, or `hf download` with `HF_ENDPOINT`.
+  - *Known limit*: two partial pulls of one commit cannot be merged (P0); delete and pull again with all files.
+- `scripts/rsync-to-target.sh` header: warn that it mirrors with `--delete` and must never be pointed at a store that holds repos the source lacks.
+- `docs/ARCHITECTURE.md`: one line each for `ingester/modeldepot_source.py` and `server/hub/sources.py`; `CLAUDE.md` Layout paragraph: the same two files.
+- Version: `server/__init__.py` and `pyproject.toml` → `0.3.0` (`tests/hub/test_version.py` keeps them equal). Done: suite green.
+
+### P7 — End-to-end acceptance with the real image, then the tag
+1. `open -a Docker` (Docker Desktop must be started by hand), `docker build --platform linux/amd64 -t modeldepot:0.3.0 .` (emulated: slow, expected).
+2. Two containers: A (port 18091) with a small store you seed (`docker exec A repo ingest-local test/one /some/folder`, plus one dataset), B (port 18092) empty. B's admin token is in B's data directory (`config/admin-token`; read it from YOUR scratch directory, never print it). Through B's API: add A as a source, queue A's repos, wait for `done`; `snapshot_download` both repos from B with the real client (fresh `HF_HOME`) and compare every file's sha256 with A's `GET /api/hub/repo`.
+3. The SSD recipe against the real SSD (read-only use): serve `/Volumes/2TB/llm-mirror` per P6 (the native variant; try the Docker variant and record whether it works), register it as a source in B, pull ONLY the two small repos (`HuggingFaceTB/SmolLM2-135M`, `QuantFactory/SmolLM-135M-GGUF`, 0.4 GB together), verify with the real client and the sha256 list. **Do not pull the large repos**: that is the owner's call. Afterwards `find /Volumes/2TB/llm-mirror -newer <marker file made before you started> -not -name .DS_Store` must print nothing.
+4. Clean up everything you created (containers, images, scratch stores, venvs; for symlinks remove the link, never its target); quit Docker Desktop if you started it.
+5. Only now tag `v0.3.0` (annotated) and push `main` and the tag.
+6. Not doable from a session, state as facts: the NAS itself (no ssh; Hermes or the owner rebuilds from the tag and checks `/openapi.json` for `0.3.0`); the real 438 GB transfer.
+
+## 7. Definition of done
+All phases committed on `main` in small commits, pushed as `claude-bot`; `pytest -q` green; the P5a-c checklists and P7 reported line by line with "not run" where applicable; tag `v0.3.0` on Gitea. Open a new Gitea ticket "Other ModelDepots: NAS verification" listing what only the NAS can show (version via `/openapi.json`, adding the Mac source, one small repo pulled, then the large ones, then "Check integrity").
+
+## 8. Prompt to hand to the implementing session
+> You are implementing `docs/plans/other-modeldepots.md` in `~/Projects/LLM_repo` (ModelDepot). Read `CLAUDE.md`, then the whole plan, then do phase P0, commit, and continue in order (P0, P1, P2a, P2b, P3, P4, P5a, P5b, P5c, P6, P7). The plan has made every design decision; where it says STOP AND REPORT, stop and report instead of deciding. Report per phase: commit sha, `git diff --stat`, what was run, what was not.
+
+## 9. Review log (rev 2)
+- **Reviewer:** an independent Sonnet reviewer read rev 1 against the code (Fable was requested by the owner; the harness hook R17 blocks it). Its findings were checked by the architect before use; verified: the implicit-token fallback (`get_token_to_send`), the offline fallback of `snapshot_download`, the real flag names (`--rev`), the anchors. Incorporated: token isolation (D10), re-read of the source at job start (D9), untrusted file list (D15), skip what the store has (D16), single HTTP client (D18), `revision` parameter (D19), route parameter `sid`, partial-revision flag, bad-staged-file healing, retry when `snapshot_download` returns quietly, resume test, disk total for the bulk queue, constructor keyword and `.get("endpoint")`, GUI structure fixes and the split of P5, CLI flags, anchors, tag after P7.
+- **Found while verifying (existing bug):** the silent loss on a second partial pull of one commit (P0). Reproduced with the project's own test fixtures on 2026-11-05.
+- **Accepted residual risks:** a hostile source can still pick which files `snapshot_download` fetches (admin-only registration, D13); a read-token holder can browse a private source through the proxy; licences are not carried.
+- **Open question for the owner (not for the implementer):** should two partial pulls of one commit be mergeable? That needs a revision that can grow, which breaks the principle "Revisions are immutable" (`docs/DESIGN.md:60`). The plan keeps the failure explicit (P0) until the owner decides.
+- **Not verified by anyone:** the GUI in a browser, the Docker build of the new code, real Range resume (P2b test 9 and P7 cover them).
